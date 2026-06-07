@@ -2,7 +2,7 @@
 
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { ChatMessage, AgentAction, ActiveProgression, ChordPosition, ScaleKey, ScaleType } from "@/lib/types";
+import { ChatMessage, AgentAction, ActiveProgression, ChordPosition } from "@/lib/types";
 import MessageBubble from "./MessageBubble";
 import PracticeLog from "./PracticeLog";
 
@@ -41,12 +41,10 @@ function parseAgentAction(text: string): AgentAction | null {
 }
 
 interface Props {
-  selectedKey: ScaleKey;
-  selectedScale: ScaleType;
   onProgressionUpdate: (prog: ActiveProgression | null) => void;
 }
 
-export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }: Props) {
+export default function Chat({ onProgressionUpdate }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -55,6 +53,9 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
   const [logOpen, setLogOpen] = useState(false);
   // Mobile: suggestion prompts are collapsed by default to keep the chat roomy.
   const [promptsOpen, setPromptsOpen] = useState(false);
+  // Mobile: the input sits between two buttons, so the full placeholder sentence
+  // overflows. Use a shorter prompt on narrow screens. Starts false to match SSR.
+  const [isNarrow, setIsNarrow] = useState(false);
   const [sessionId, setSessionId] = useState<string>(() => {
     if (typeof window !== "undefined") {
       const stored = localStorage.getItem("chordcoach_session");
@@ -88,6 +89,14 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 640px)");
+    const update = () => setIsNarrow(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
 
   const fetchSkillLevel = useCallback(async () => {
     if (!sessionId) return;
@@ -154,7 +163,7 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
         body: JSON.stringify({
           message: text,
           session_id: sessionId,
-          context: { key: selectedKey, scale: selectedScale, skill_level: skillLevel },
+          context: { skill_level: skillLevel },
         }),
       });
 
@@ -351,7 +360,7 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Ask about chords, progressions, or music theory…"
+              placeholder={isNarrow ? "Ask about chords or theory…" : "Ask about chords, progressions, or music theory…"}
               rows={1}
               disabled={loading}
               className="flex-1 bg-[#1A1712] border border-[#2E2920] text-[#F0EAD6] placeholder-[#5A5244]

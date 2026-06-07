@@ -47,12 +47,16 @@ export default function ProgressionDisplay({ progression }: Props) {
         {chords.map((chord, idx) => (
           <div
             key={`${chord.name}-${idx}`}
-            className="flex flex-col items-center gap-2 p-3 bg-[#1A1712] border border-[#2E2920] rounded-xl
+            className="relative flex flex-col items-center gap-2 p-3 bg-[#1A1712] border border-[#2E2920] rounded-xl
                        hover:border-[#E8820C] hover:shadow-[0_0_12px_rgba(232,130,12,0.15)] transition-all duration-200"
             style={{
               animation: `slideUp 0.3s ease-out ${idx * 80}ms both`,
             }}
           >
+            {/* Order number */}
+            <span className="absolute top-2.5 left-3 text-[#3E3528] text-[11px] font-mono select-none">
+              {idx + 1}
+            </span>
             <ChordDiagram chord={chord} size="sm" />
             <div className="text-center">
               <div

@@ -3,14 +3,11 @@
 import React, { useState } from "react";
 import Chat from "@/components/Chat";
 import ProgressionDisplay from "@/components/ProgressionDisplay";
-import ScaleSelector from "@/components/ScaleSelector";
-import { ActiveProgression, ScaleKey, ScaleType } from "@/lib/types";
+import { ActiveProgression } from "@/lib/types";
 
 type MobileView = "chat" | "chords";
 
 export default function Home() {
-  const [selectedKey, setSelectedKey] = useState<ScaleKey>("C");
-  const [selectedScale, setSelectedScale] = useState<ScaleType>("Major");
   const [activeProgression, setActiveProgression] = useState<ActiveProgression | null>(null);
 
   // Mobile-only: which section fills the screen. Desktop ignores this (both panels show).
@@ -58,12 +55,6 @@ export default function Home() {
           </div>
         </div>
 
-        <ScaleSelector
-          selectedKey={selectedKey}
-          selectedScale={selectedScale}
-          onKeyChange={setSelectedKey}
-          onScaleChange={setSelectedScale}
-        />
       </header>
 
       {/* ─── Mobile section switcher (hidden on desktop) ────────────────────── */}
@@ -112,8 +103,6 @@ export default function Home() {
           } md:flex flex-col flex-1 md:flex-none md:w-[55%] border-r border-[#2E2920] overflow-hidden min-h-0`}
         >
           <Chat
-            selectedKey={selectedKey}
-            selectedScale={selectedScale}
             onProgressionUpdate={handleProgressionUpdate}
           />
         </div>
