@@ -37,11 +37,19 @@ export interface ChatMessage {
 }
 
 export interface AgentAction {
-  action: "show_chords" | "show_chord";
+  action: "show_chords" | "show_chord" | "show_practice_log";
   chords?: string[];
   chord?: string;
   progression_name?: string;
   bpm_suggestion?: number;
+  message?: string;
+}
+
+export interface PracticeItem {
+  type: "progression" | "song_search" | "chord";
+  name: string;
+  chords: string[];
+  timestamp: number;
 }
 
 export interface ActiveProgression {

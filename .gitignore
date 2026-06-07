@@ -47,3 +47,7 @@ Thumbs.db
 *.swo
 .vscode/
 .idea/
+
+# Claude Code — ignore personal settings, track project docs
+.claude/
+!.claude/CLAUDE.md

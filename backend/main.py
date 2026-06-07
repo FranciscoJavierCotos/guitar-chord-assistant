@@ -61,6 +61,7 @@ async def log_requests(request: Request, call_next):
 class ChatContext(BaseModel):
     key: str = ""
     scale: str = ""
+    skill_level: str = ""
 
 
 class ChatRequest(BaseModel):
@@ -77,10 +78,10 @@ class ChatResponse(BaseModel):
 # ─── Lazy imports (avoid import errors if packages missing at startup) ────────
 def _get_agent_modules():
     from agent.coach_agent import run_agent
-    from agent.memory import get_memory, clear_memory
+    from agent.memory import get_history, clear_memory
     from data.chords import CHORDS, get_chord
     from data.progressions import PROGRESSIONS, get_progressions_by_genre, get_progressions_by_key
-    return run_agent, get_memory, clear_memory, CHORDS, get_chord, PROGRESSIONS, get_progressions_by_genre, get_progressions_by_key
+    return run_agent, get_history, clear_memory, CHORDS, get_chord, PROGRESSIONS, get_progressions_by_genre, get_progressions_by_key
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -95,16 +96,17 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY not configured on the server.")
 
     try:
-        run_agent, get_memory, _, _, _, _, _, _ = _get_agent_modules()
+        run_agent, get_history, _, _, _, _, _, _ = _get_agent_modules()
     except ImportError as e:
         raise HTTPException(status_code=503, detail=f"Agent modules not available: {e}")
 
     try:
-        memory = get_memory(req.session_id)
+        history = get_history(req.session_id)
         response_text = await run_agent(
             message=req.message,
-            memory=memory,
+            history=history,
             context=req.context.model_dump(),
+            session_id=req.session_id,
         )
         return ChatResponse(response=response_text, session_id=req.session_id)
     except Exception as exc:
@@ -166,6 +168,17 @@ async def clear_session(session_id: str):
 
     cleared = clear_memory(session_id)
     return {"cleared": cleared}
+
+
+@app.get("/api/session/{session_id}/practice-log")
+async def get_practice_log_endpoint(session_id: str):
+    from agent.memory import get_session_data
+    data = get_session_data(session_id)
+    return {
+        "session_id": session_id,
+        "practice_log": data["practice_log"],
+        "skill_level": data["skill_level"],
+    }
 
 
 @app.exception_handler(Exception)

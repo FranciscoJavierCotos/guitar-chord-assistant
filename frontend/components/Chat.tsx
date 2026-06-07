@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useRef, useEffect, useState } from "react";
+import React, { useRef, useEffect, useState, useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { ChatMessage, AgentAction, ActiveProgression, ChordPosition, ScaleKey, ScaleType } from "@/lib/types";
 import MessageBubble from "./MessageBubble";
+import PracticeLog from "./PracticeLog";
 
 const QUICK_PROMPTS = [
   "Give me a blues progression in E",
@@ -11,6 +12,8 @@ const QUICK_PROMPTS = [
   "Teach me a beginner pop progression",
   "What's a good jazz ii-V-I?",
   "Explain why Am-F-C-G works",
+  "What have I been practicing?",
+  "Chords inspired by a song...",
 ];
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
@@ -47,6 +50,11 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [logRefresh, setLogRefresh] = useState(0);
+  const [skillLevel, setSkillLevel] = useState("");
+  const [logOpen, setLogOpen] = useState(false);
+  // Mobile: suggestion prompts are collapsed by default to keep the chat roomy.
+  const [promptsOpen, setPromptsOpen] = useState(false);
   const [sessionId, setSessionId] = useState<string>(() => {
     if (typeof window !== "undefined") {
       const stored = localStorage.getItem("chordcoach_session");
@@ -72,11 +80,27 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
     setMessages([{ ...WELCOME_MESSAGE, timestamp: Date.now() }]);
     onProgressionUpdate(null);
     setInput("");
+    setSkillLevel("");
+    setLogRefresh(0);
+    setLogOpen(false);
   }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const fetchSkillLevel = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/session/${sessionId}/practice-log`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.skill_level) setSkillLevel(data.skill_level);
+      }
+    } catch { /* ignore */ }
+  }, [sessionId]);
+
+  useEffect(() => { fetchSkillLevel(); }, [fetchSkillLevel]);
 
   async function fetchChordData(chordName: string): Promise<ChordPosition | null> {
     try {
@@ -109,6 +133,8 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
           progressionName: chordData.full_name ?? action.chord,
         });
       }
+    } else if (action.action === "show_practice_log") {
+      setLogOpen(true);
     }
   }
 
@@ -128,7 +154,7 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
         body: JSON.stringify({
           message: text,
           session_id: sessionId,
-          context: { key: selectedKey, scale: selectedScale },
+          context: { key: selectedKey, scale: selectedScale, skill_level: skillLevel },
         }),
       });
 
@@ -150,6 +176,8 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
 
       const action = parseAgentAction(responseText);
       if (action) await handleAgentAction(action);
+      setLogRefresh((n) => n + 1);
+      fetchSkillLevel();
     } catch (err) {
       const errorMsg: ChatMessage = {
         id: uuidv4(),
@@ -258,15 +286,31 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
         <div ref={bottomRef} />
       </div>
 
-      {/* Quick prompts */}
+      {/* Practice log */}
+      <PracticeLog
+        sessionId={sessionId}
+        refreshTrigger={logRefresh}
+        forceOpen={logOpen}
+        onOpenChange={setLogOpen}
+      />
+
+      {/* Quick prompts — always shown on desktop, toggleable on mobile.
+          On mobile they scroll horizontally in a single row to save vertical space. */}
       {!isAtLimit && (
-        <div className="px-4 pb-2 flex flex-wrap gap-1.5">
+        <div
+          className={`${promptsOpen ? "flex" : "hidden"} md:flex px-4 pb-2 gap-1.5
+                     overflow-x-auto md:flex-wrap whitespace-nowrap md:whitespace-normal
+                     [scrollbar-width:none] [-ms-overflow-style:none]`}
+        >
           {QUICK_PROMPTS.map((prompt) => (
             <button
               key={prompt}
-              onClick={() => sendMessage(prompt)}
+              onClick={() => {
+                setPromptsOpen(false);
+                sendMessage(prompt);
+              }}
               disabled={loading}
-              className="text-xs px-3 py-1.5 rounded-full bg-[#252017] border border-[#2E2920]
+              className="flex-shrink-0 text-xs px-3 py-1.5 rounded-full bg-[#252017] border border-[#2E2920]
                          text-[#9A8F78] hover:border-[#E8820C] hover:text-[#E8820C]
                          transition-colors duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
             >
@@ -284,6 +328,24 @@ export default function Chat({ selectedKey, selectedScale, onProgressionUpdate }
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="flex gap-2 items-end">
+            {/* Suggestions toggle — mobile only */}
+            <button
+              type="button"
+              onClick={() => setPromptsOpen((o) => !o)}
+              aria-pressed={promptsOpen}
+              aria-label="Toggle suggested prompts"
+              title="Suggested prompts"
+              className={`md:hidden flex-shrink-0 w-10 h-10 rounded-xl border flex items-center justify-center
+                          transition-all duration-150 active:scale-95
+                          ${promptsOpen
+                            ? "border-[#E8820C] text-[#E8820C] bg-[#252017]"
+                            : "border-[#2E2920] text-[#9A8F78] bg-[#1A1712] hover:text-[#E8820C]"}`}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.6.6 1 1.2 1 2.5h6c0-1.3.4-1.9 1-2.5A6 6 0 0 0 12 3z"
+                  stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
             <textarea
               ref={inputRef}
               value={input}
