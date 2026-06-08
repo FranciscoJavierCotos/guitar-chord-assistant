@@ -119,7 +119,7 @@ Each session gets an `InMemoryChatMessageHistory` plus a `practice_log` list and
 field, all stored in a plain Python dict keyed by UUID. The agent feeds back the last 10 turns
 (`HISTORY_WINDOW_TURNS`), windowed at read time. Sessions expire after two hours via lazy eviction
 on each request. There is no database — this is a deliberate MVP choice that keeps the deploy
-surface minimal (one stateless process per service on Railway).
+surface minimal (one process per service on Render). Sessions reset on backend restart/redeploy.
 
 The session UUID is generated on the frontend and persisted to `localStorage`, so the user's
 conversation survives page refreshes within the same browser tab.
@@ -138,7 +138,8 @@ conversation survives page refreshes within the same browser tab.
 | Styling | Tailwind CSS | 3.4.1 |
 | Markdown | `react-markdown` + `remark-gfm` | — |
 | Diagrams | Hand-coded SVG React component | no library |
-| Deploy | Railway (two independent services) | — |
+| API hardening | `slowapi` rate limiting + shared-secret auth | — |
+| Deploy | Render (two public Web Services, `render.yaml` Blueprint) | — |
 
 ---
 
@@ -146,8 +147,8 @@ conversation survives page refreshes within the same browser tab.
 
 ### Prerequisites
 
-- Python 3.11+
-- Node.js 18+
+- Python 3.12 (pinned via `backend/.python-version`)
+- Node.js 20+ (pinned via `frontend/package.json` `engines`)
 - A DeepSeek API key (free tier available at platform.deepseek.com)
 
 ### Backend
@@ -164,7 +165,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# Edit .env — set DEEPSEEK_API_KEY=your_key_here
+# Edit .env — set DEEPSEEK_API_KEY=your_key_here and a local INTERNAL_API_TOKEN
+# (generate one: python -c "import secrets;print(secrets.token_urlsafe(32))")
 
 uvicorn main:app --reload --port 8000
 ```
@@ -179,7 +181,8 @@ cd chord-coach/frontend
 npm install
 
 cp .env.example .env.local
-# Default NEXT_PUBLIC_BACKEND_URL=http://localhost:8000 works for local dev
+# Set BACKEND_URL=http://localhost:8000 and INTERNAL_API_TOKEN to the SAME value
+# you put in backend/.env (both are server-only — no NEXT_PUBLIC_ prefix).
 
 npm run dev        # http://localhost:3000
 ```
@@ -190,15 +193,22 @@ Verify chord diagrams in isolation (no backend needed): `http://localhost:3000/t
 
 ## API Reference
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/health` | GET | Health check |
-| `/api/chat` | POST | Send message to the AI agent |
-| `/api/chord/{name}` | GET | Chord fingering data (e.g. `Am`, `G7`, `Bm`) |
-| `/api/chords` | GET | All chords in the database |
-| `/api/progressions` | GET | All progressions; filter with `?genre=blues` or `?key=E` |
-| `/api/session/{id}` | DELETE | Clear a session's conversation memory |
-| `/api/session/{id}/practice-log` | GET | Retrieve session practice history and skill level |
+> **Auth:** every endpoint except `/api/health` requires the header
+> `X-Internal-Token: <INTERNAL_API_TOKEN>` and returns **401** without it. The
+> browser never sends this directly — it calls same-origin Next.js route handlers
+> (`/api/chat`, `/api/backend/<backend-path>`) which attach the token server-side
+> and forward the real client IP as `X-Forwarded-For` for rate limiting.
+> `/api/chat` is rate-limited to **20/min per IP** plus a global **500/day** cap.
+
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `/api/health` | GET | open | Health check (Render health probe) |
+| `/api/chat` | POST | token | Send message to the AI agent (rate-limited) |
+| `/api/chord/{name}` | GET | token | Chord fingering data (e.g. `Am`, `G7`, `Bm`) |
+| `/api/chords` | GET | token | All chords in the database |
+| `/api/progressions` | GET | token | All progressions; filter with `?genre=blues` or `?key=E` |
+| `/api/session/{id}` | DELETE | token | Clear a session's conversation memory |
+| `/api/session/{id}/practice-log` | GET | token | Retrieve session practice history and skill level |
 
 **Chat request body:**
 
@@ -343,15 +353,26 @@ key and a per-chord Roman-numeral line, and cadence detection runs relative to t
 
 ---
 
-## Deployment on Railway
+## Deployment on Render
 
-Both services use `railway.toml` for zero-config detection. The backend auto-detects Python via
-Nixpacks; the frontend builds with `npm run build` and serves with `npm start`.
+Both services deploy as **public Web Services** from one repo via the `render.yaml`
+Blueprint at the project root. Security comes from the app design, not the hosting
+tier — the DeepSeek key stays on the backend, every token-spending route requires a
+shared secret, and traffic is rate-limited and CORS-locked.
 
-1. Create a Railway project and connect the GitHub repo.
-2. **Backend service** — set Root Directory to `/chord-coach/backend`, add `DEEPSEEK_API_KEY`.
-3. **Frontend service** — set Root Directory to `/chord-coach/frontend`, add
-   `NEXT_PUBLIC_BACKEND_URL` pointing at the backend Railway URL.
+**See [`RENDER_MIGRATION.md`](./RENDER_MIGRATION.md) for the full step-by-step runbook**
+(deploy order, exact env vars / Secret Files, key-rotation procedure, and an incident
+checklist). In brief:
 
-Health check paths (`/api/health` for backend, `/` for frontend) are already set in
-`railway.toml` and will gate deploys.
+1. **Rotate the DeepSeek key first** — treat any key that has been in a local `.env`
+   as compromised. Revoke it and generate a fresh one.
+2. **New → Blueprint** in Render, pointed at the repo. It reads `render.yaml` and
+   proposes `chordcoach-backend` and `chordcoach-frontend`.
+3. Enter the fresh `DEEPSEEK_API_KEY` on the backend (`sync: false`, or a Secret
+   File). `INTERNAL_API_TOKEN` is auto-generated and shared to the frontend via
+   `fromService`; `BACKEND_URL` is wired from the backend's host.
+4. Deploy (backend first, then frontend). After the frontend URL exists, set
+   `FRONTEND_URL` on the backend to that exact origin and redeploy so CORS is precise.
+
+Health check paths (`/api/health` for the backend) are set in `render.yaml` and gate
+deploys.

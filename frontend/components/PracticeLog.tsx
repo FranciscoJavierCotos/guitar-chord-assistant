@@ -10,7 +10,6 @@ interface Props {
   onOpenChange?: (open: boolean) => void;
 }
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 const LS_KEY = "chordcoach_practice_log";
 
 const TYPE_ICON: Record<string, string> = {
@@ -63,7 +62,7 @@ export default function PracticeLog({ sessionId, refreshTrigger, forceOpen, onOp
   const fetchLog = useCallback(async () => {
     if (!sessionId) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/session/${sessionId}/practice-log`);
+      const res = await fetch(`/api/backend/api/session/${sessionId}/practice-log`);
       if (res.ok) {
         const data = await res.json();
         const merged = mergeAndSave(data.practice_log ?? []);

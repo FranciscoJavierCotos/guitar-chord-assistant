@@ -1,0 +1,45 @@
+# Render Blueprint for ChordCoach — two public Web Services from one repo.
+# The DeepSeek key lives only on the backend; the shared INTERNAL_API_TOKEN is
+# generated once on the backend and pulled into the frontend via fromService, so
+# it is never typed into the repo. See RENDER_MIGRATION.md for the full runbook.
+services:
+  # ─── Public backend (FastAPI) ────────────────────────────────────────────────
+  - type: web
+    name: chordcoach-backend
+    runtime: python
+    region: oregon
+    rootDir: backend
+    plan: starter # Starter avoids cold-start request drops on the AI path
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health # must stay unauthenticated
+    envVars:
+      - key: ENV
+        value: production
+      - key: DEEPSEEK_API_KEY
+        sync: false # enter in the dashboard (or supply as a Secret File)
+      - key: INTERNAL_API_TOKEN
+        generateValue: true # Render generates a strong random value
+      - key: FRONTEND_URL
+        sync: false # set to the real frontend URL after first deploy, then redeploy
+
+  # ─── Public frontend (Next.js) ───────────────────────────────────────────────
+  - type: web
+    name: chordcoach-frontend
+    runtime: node
+    region: oregon
+    rootDir: frontend
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: BACKEND_URL
+        fromService:
+          type: web
+          name: chordcoach-backend
+          property: host # bare hostname; serverBackend.ts prepends https://
+      - key: INTERNAL_API_TOKEN
+        fromService:
+          type: web
+          name: chordcoach-backend
+          envVarKey: INTERNAL_API_TOKEN # reuse the same generated value

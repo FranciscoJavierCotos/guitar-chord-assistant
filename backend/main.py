@@ -1,53 +1,133 @@
 """
 ChordCoach FastAPI backend.
 Run: uvicorn main:app --reload --port 8000
+
+Security model (the backend is deployed on a PUBLIC URL):
+- Every token-spending / data route requires the shared-secret header X-Internal-Token,
+  which must equal env INTERNAL_API_TOKEN. The Next.js server attaches it; the browser
+  never sees it. /api/health stays open so Render's health check works.
+- Rate limiting (slowapi) keyed on the real client IP (X-Forwarded-For) protects the
+  DeepSeek bill even on an authorized path.
+- CORS is locked to FRONTEND_URL (localhost only when ENV=development).
+- Interactive docs are disabled in production.
+- A request-size ceiling rejects oversized payloads.
 """
 
 import os
 import time
 import logging
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("chordcoach")
 
+ENV = os.getenv("ENV", "development").lower()
+IS_PROD = ENV == "production"
+
+# Max request body size (bytes). ChatRequest.message is already capped at 2000 chars;
+# this is a cheap outer guard against oversized payloads.
+MAX_BODY_BYTES = 16 * 1024  # 16 KB
+
+
+# ─── Shared-secret auth ────────────────────────────────────────────────────────
+def require_internal_token(x_internal_token: str | None = Header(default=None)) -> None:
+    """Reject any request whose X-Internal-Token header does not match
+    INTERNAL_API_TOKEN. Constant-time compare to avoid timing leaks."""
+    expected = os.getenv("INTERNAL_API_TOKEN")
+    if not expected:
+        # Fail closed: if the server has no token configured, no caller can be authorized.
+        logger.error("INTERNAL_API_TOKEN not configured — rejecting authenticated request")
+        raise HTTPException(status_code=503, detail="Server auth not configured.")
+    if not x_internal_token or not secrets.compare_digest(x_internal_token, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal token.")
+
+
+# ─── Rate limiting ─────────────────────────────────────────────────────────────
+def client_ip(request: Request) -> str:
+    """Real client IP for rate limiting. The Next.js proxy forwards the browser's
+    IP as X-Forwarded-For; Render's edge also sets it. Fall back to the socket peer."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        # X-Forwarded-For: client, proxy1, proxy2 — the first entry is the real client.
+        return forwarded.split(",")[0].strip()
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=client_ip)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("ChordCoach backend starting up")
+    logger.info("ChordCoach backend starting up (ENV=%s)", ENV)
     if not os.getenv("DEEPSEEK_API_KEY"):
         logger.warning("DEEPSEEK_API_KEY not set — agent calls will fail")
+    if not os.getenv("INTERNAL_API_TOKEN"):
+        logger.warning("INTERNAL_API_TOKEN not set — authenticated routes will 503")
     yield
     logger.info("ChordCoach backend shutting down")
 
+
+# Disable interactive docs / schema in production to shrink the attack surface.
+_docs_kwargs = {"docs_url": None, "redoc_url": None, "openapi_url": None} if IS_PROD else {}
 
 app = FastAPI(
     title="ChordCoach API",
     description="AI-powered guitar chord progression coach",
     version="1.0.0",
     lifespan=lifespan,
+    **_docs_kwargs,
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
+# Browser traffic goes through the Next.js server (same-origin), so CORS is a
+# defence-in-depth lock rather than the primary control. Only the production
+# frontend origin is allowed; localhost is permitted only in development.
 frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+allowed_origins = [frontend_url]
+if not IS_PROD:
+    allowed_origins += ["http://localhost:3000", "http://127.0.0.1:3000"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[frontend_url, "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Internal-Token"],
 )
 
+
+# ─── Request-size limit ────────────────────────────────────────────────────────
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_BODY_BYTES:
+                return JSONResponse(status_code=413, content={"detail": "Request body too large."})
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length."})
+    return await call_next(request)
+
+
 # ─── Request logging middleware ────────────────────────────────────────────────
+# Logs only method, path, status and duration — never bodies or headers, so no
+# secret (DeepSeek key, internal token) can leak into Render logs.
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start = time.time()
@@ -87,11 +167,14 @@ def _get_agent_modules():
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
+    """Unauthenticated — Render's health check hits this. Returns no secrets."""
     return {"status": "ok", "version": "1.0.0"}
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(require_internal_token)])
+@limiter.limit("20/minute")  # per real client IP
+@limiter.limit("500/day", key_func=lambda: "global")  # global cap to protect the DeepSeek bill
+async def chat(request: Request, req: ChatRequest):
     if not os.getenv("DEEPSEEK_API_KEY"):
         raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY not configured on the server.")
 
@@ -114,7 +197,7 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/api/chord/{chord_name}")
+@app.get("/api/chord/{chord_name}", dependencies=[Depends(require_internal_token)])
 async def get_chord_endpoint(chord_name: str):
     try:
         _, _, _, _, get_chord, _, _, _ = _get_agent_modules()
@@ -127,7 +210,7 @@ async def get_chord_endpoint(chord_name: str):
     return chord
 
 
-@app.get("/api/chords")
+@app.get("/api/chords", dependencies=[Depends(require_internal_token)])
 async def list_chords():
     try:
         _, _, _, CHORDS, _, _, _, _ = _get_agent_modules()
@@ -145,7 +228,7 @@ async def list_chords():
     }
 
 
-@app.get("/api/progressions")
+@app.get("/api/progressions", dependencies=[Depends(require_internal_token)])
 async def list_progressions(genre: str = "", key: str = ""):
     try:
         _, _, _, _, _, PROGRESSIONS, get_progressions_by_genre, get_progressions_by_key = _get_agent_modules()
@@ -159,7 +242,7 @@ async def list_progressions(genre: str = "", key: str = ""):
     return PROGRESSIONS
 
 
-@app.delete("/api/session/{session_id}")
+@app.delete("/api/session/{session_id}", dependencies=[Depends(require_internal_token)])
 async def clear_session(session_id: str):
     try:
         _, _, clear_memory, _, _, _, _, _ = _get_agent_modules()
@@ -170,7 +253,7 @@ async def clear_session(session_id: str):
     return {"cleared": cleared}
 
 
-@app.get("/api/session/{session_id}/practice-log")
+@app.get("/api/session/{session_id}/practice-log", dependencies=[Depends(require_internal_token)])
 async def get_practice_log_endpoint(session_id: str):
     from agent.memory import get_session_data
     data = get_session_data(session_id)

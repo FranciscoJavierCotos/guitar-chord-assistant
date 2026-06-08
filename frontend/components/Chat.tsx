@@ -16,7 +16,9 @@ const QUICK_PROMPTS = [
   "Chords inspired by a song...",
 ];
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+// The browser only ever calls our own same-origin /api routes. Those Next.js
+// route handlers attach the server-only X-Internal-Token and proxy to the backend,
+// so the secret never reaches the client.
 const MAX_USER_TURNS = 20;
 
 const WELCOME_MESSAGE: ChatMessage = {
@@ -101,7 +103,7 @@ export default function Chat({ onProgressionUpdate }: Props) {
   const fetchSkillLevel = useCallback(async () => {
     if (!sessionId) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/session/${sessionId}/practice-log`);
+      const res = await fetch(`/api/backend/api/session/${sessionId}/practice-log`);
       if (res.ok) {
         const data = await res.json();
         if (data.skill_level) setSkillLevel(data.skill_level);
@@ -113,7 +115,7 @@ export default function Chat({ onProgressionUpdate }: Props) {
 
   async function fetchChordData(chordName: string): Promise<ChordPosition | null> {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/chord/${encodeURIComponent(chordName)}`);
+      const res = await fetch(`/api/backend/api/chord/${encodeURIComponent(chordName)}`);
       if (!res.ok) return null;
       return res.json();
     } catch {
@@ -157,7 +159,7 @@ export default function Chat({ onProgressionUpdate }: Props) {
     setInput("");
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/chat`, {
+      const res = await fetch(`/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -192,8 +194,8 @@ export default function Chat({ onProgressionUpdate }: Props) {
         id: uuidv4(),
         role: "assistant",
         content:
-          "I'm having trouble connecting to the server right now. Make sure the backend is running at " +
-          `\`${BACKEND_URL}\`, then try again.`,
+          "I'm having trouble connecting to the server right now. " +
+          "Please try again in a moment.",
         timestamp: Date.now(),
       };
       setMessages((prev) => prev.filter((m) => m.id !== "typing").concat(errorMsg));

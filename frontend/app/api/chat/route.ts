@@ -1,18 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
+import { BACKEND_URL, backendHeaders, relay } from "@/lib/serverBackend";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+// Always run on the server at request time; never cache token-spending calls.
+export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const body = await req.text();
     const res = await fetch(`${BACKEND_URL}/api/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers: backendHeaders(req, { "Content-Type": "application/json" }),
+      body,
     });
-    const data = await res.json();
-    return NextResponse.json(data, { status: res.status });
-  } catch (err) {
-    return NextResponse.json({ error: "Failed to reach backend" }, { status: 502 });
+    return relay(res);
+  } catch {
+    return NextResponse.json({ detail: "Failed to reach backend" }, { status: 502 });
   }
 }

@@ -51,3 +51,5 @@ Thumbs.db
 # Claude Code — ignore personal settings, track project docs
 .claude/
 !.claude/CLAUDE.md
+
+RENDER_MIGRATION.md

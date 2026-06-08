@@ -108,9 +108,16 @@ Keep responses focused, practical, and inspiring."""
 
 
 def build_agent_executor() -> AgentExecutor:
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        # Belt-and-suspenders: the /api/chat route already 503s when the key is
+        # missing, but guard here too so a misconfigured deploy fails clearly
+        # instead of with an opaque KeyError.
+        raise RuntimeError("DEEPSEEK_API_KEY is not configured on the server.")
+
     llm = ChatOpenAI(
         model="deepseek-chat",
-        api_key=os.environ["DEEPSEEK_API_KEY"],
+        api_key=api_key,
         base_url="https://api.deepseek.com/v1",
         temperature=0.7,
         max_tokens=2048,
