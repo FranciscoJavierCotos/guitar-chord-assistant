@@ -351,6 +351,28 @@ nudges any tonic that a `V→I` resolves into — this is inert on looping progr
 linear `V→I`, so it does not disturb cases like `Am-F-C-G`. `explain_theory` now prints the detected
 key and a per-chord Roman-numeral line, and cadence detection runs relative to the inferred tonic.
 
+### 7. Truncated `BACKEND_URL` caused 502 on all proxied requests
+
+**Symptom.** The frontend loaded, but every chat message and chord-diagram request returned 502
+Bad Gateway. The browser network tab showed `POST /api/chat` and
+`GET /api/backend/api/session/.../practice-log` both failing with 502; the server error message
+was `"Failed to reach backend"`.
+
+**Root cause.** `BACKEND_URL` in the Render frontend service had been manually typed as
+`ttps://chordcoach-backend.onrender.com` — the leading `h` was missing. `resolveBackendUrl()`
+in `lib/serverBackend.ts` tests the value against `/^https?:\/\//i`; because the value didn't
+match, it prepended `https://` and produced the invalid URL
+`https://ttps://chordcoach-backend.onrender.com`. Every `fetch()` call threw a connection error
+that was caught and returned as 502.
+
+**Fix.** Corrected `BACKEND_URL` to `https://chordcoach-backend.onrender.com` in the Render
+dashboard for `chordcoach-frontend`. No code change was required.
+
+**Prevention.** After any deploy, open the frontend service's **Environment** tab and confirm
+`BACKEND_URL` begins with `https://`. The `fromService` Blueprint wiring (which sets it to the
+bare hostname `chordcoach-backend.onrender.com`) is handled correctly by the code — it is only
+risky if the variable is edited manually in the dashboard.
+
 ---
 
 ## Deployment on Render
@@ -373,6 +395,13 @@ checklist). In brief:
    `fromService`; `BACKEND_URL` is wired from the backend's host.
 4. Deploy (backend first, then frontend). After the frontend URL exists, set
    `FRONTEND_URL` on the backend to that exact origin and redeploy so CORS is precise.
+5. **Verify `BACKEND_URL` after deploy.** Open the frontend service's Environment tab
+   and confirm the value is either the bare hostname (`chordcoach-backend.onrender.com`,
+   set by `fromService`) or the full URL starting with `https://`. If you have edited
+   it manually, a single typo — such as a missing leading `h` — produces an invalid URL
+   that silently causes every proxied request to return 502. The `/api/health` endpoint
+   will still pass (it is called directly by Render, not through the proxy), so a
+   corrupt `BACKEND_URL` is not caught by the health check.
 
 Health check paths (`/api/health` for the backend) are set in `render.yaml` and gate
 deploys.
