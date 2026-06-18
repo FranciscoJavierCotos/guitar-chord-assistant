@@ -49,7 +49,7 @@ Browser
   |                  components/ChordDiagram.tsx  hand-coded SVG renderer (no library)
   |                  lib/types.ts            shared TypeScript interfaces
   |
-  |── POST /api/chat ──> FastAPI (port 8000)
+  |── POST /api/chat/stream ──> FastAPI (port 8000)   token-streamed reply
                          main.py             routes, CORS, request logging
                          agent/coach_agent.py  LangChain AgentExecutor + system prompt
                          agent/tools.py        13 @tool functions
@@ -80,6 +80,11 @@ fetches real fingering data for each chord name from the backend's `/api/chord/{
 The chord diagram panel renders from that verified data — not from LLM output. This separation
 means the LLM can describe chords in any prose style while the visual layer stays grounded in
 the authoritative database.
+
+Because the reply is **streamed** token-by-token, `Chat.tsx` accumulates chunks into the live
+message and only parses the action block once the stream finishes (the full JSON has arrived).
+`MessageBubble` strips both completed and still-unterminated trailing `json fences, so the raw
+JSON never flashes on screen mid-stream.
 
 ### Agent Design: Native Function Calling, Not ReAct
 
@@ -203,7 +208,8 @@ Verify chord diagrams in isolation (no backend needed): `http://localhost:3000/t
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
 | `/api/health` | GET | open | Health check (Render health probe) |
-| `/api/chat` | POST | token | Send message to the AI agent (rate-limited) |
+| `/api/chat` | POST | token | Send message to the AI agent; returns the full reply as JSON `{response, session_id}` (rate-limited) |
+| `/api/chat/stream` | POST | token | Same body as `/api/chat`; streams the reply token-by-token as chunked `text/plain` so it renders as it's generated. Used by the frontend. Same rate limits. |
 | `/api/chord/{name}` | GET | token | Chord fingering data (e.g. `Am`, `G7`, `Bm`) |
 | `/api/chords` | GET | token | All chords in the database |
 | `/api/progressions` | GET | token | All progressions; filter with `?genre=blues` or `?key=E` |

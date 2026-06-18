@@ -169,21 +169,56 @@ export default function Chat({ onProgressionUpdate }: Props) {
         }),
       });
 
-      if (!res.ok) {
+      if (!res.ok || !res.body) {
         throw new Error(`Server responded with ${res.status}`);
       }
 
-      const data = await res.json();
-      const responseText: string = data.response ?? "Sorry, I didn't get a response.";
+      // Stream the response token-by-token so text appears as it's generated
+      // instead of after the full ~25s agent run completes.
+      const assistantId = uuidv4();
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let responseText = "";
+      let started = false;
 
-      const assistantMsg: ChatMessage = {
-        id: uuidv4(),
-        role: "assistant",
-        content: responseText,
-        timestamp: Date.now(),
-      };
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        responseText += decoder.decode(value, { stream: true });
+        if (!started) {
+          // First chunk: swap the typing indicator for the live message.
+          started = true;
+          const assistantMsg: ChatMessage = {
+            id: assistantId,
+            role: "assistant",
+            content: responseText,
+            timestamp: Date.now(),
+          };
+          setMessages((prev) => prev.filter((m) => m.id !== "typing").concat(assistantMsg));
+        } else {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantId ? { ...m, content: responseText } : m)),
+          );
+        }
+      }
+      responseText += decoder.decode();
 
-      setMessages((prev) => prev.filter((m) => m.id !== "typing").concat(assistantMsg));
+      if (!started) {
+        // Stream finished with no content — fall back to a placeholder.
+        responseText = responseText || "Sorry, I didn't get a response.";
+        const assistantMsg: ChatMessage = {
+          id: assistantId,
+          role: "assistant",
+          content: responseText,
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => prev.filter((m) => m.id !== "typing").concat(assistantMsg));
+      } else {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === assistantId ? { ...m, content: responseText } : m)),
+        );
+      }
 
       const action = parseAgentAction(responseText);
       if (action) await handleAgentAction(action);

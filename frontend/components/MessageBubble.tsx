@@ -10,8 +10,13 @@ interface Props {
 }
 
 // Strip the trailing ```json ... ``` action block from assistant messages before display.
+// During streaming the block arrives a token at a time, so we also strip an
+// unterminated trailing ```json fence to keep the raw JSON from flashing on screen.
 function stripActionBlock(content: string): string {
-  return content.replace(/```json\s*\{[\s\S]*?"action"\s*:[\s\S]*?\}\s*```/g, "").trim();
+  return content
+    .replace(/```json\s*\{[\s\S]*?"action"\s*:[\s\S]*?\}\s*```/g, "")
+    .replace(/```json[\s\S]*$/, "")
+    .trim();
 }
 
 function GuitarPickIcon() {

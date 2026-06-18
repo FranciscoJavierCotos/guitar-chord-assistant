@@ -147,23 +147,31 @@ def _windowed(history: InMemoryChatMessageHistory) -> list:
     return history.messages[-(HISTORY_WINDOW_TURNS * 2):]
 
 
+def _apply_context_prefix(message: str, context: dict | None) -> str:
+    """Prepend a bracketed context hint (key/scale/skill) to the user message so
+    the agent has session context. Returns the message unchanged if no context."""
+    if not context:
+        return message
+    key = context.get("key", "")
+    scale = context.get("scale", "")
+    skill = context.get("skill_level", "")
+    prefix_parts = []
+    if key or scale:
+        prefix_parts.append(f"key of {key}, {scale} scale")
+    if skill:
+        prefix_parts.append(f"user level: {skill}")
+    if prefix_parts:
+        return f"[Context: {', '.join(prefix_parts)}] " + message
+    return message
+
+
 async def run_agent(
     message: str,
     history: InMemoryChatMessageHistory,
     context: dict | None = None,
     session_id: str = "",
 ) -> str:
-    if context:
-        key = context.get("key", "")
-        scale = context.get("scale", "")
-        skill = context.get("skill_level", "")
-        prefix_parts = []
-        if key or scale:
-            prefix_parts.append(f"key of {key}, {scale} scale")
-        if skill:
-            prefix_parts.append(f"user level: {skill}")
-        if prefix_parts:
-            message = f"[Context: {', '.join(prefix_parts)}] " + message
+    message = _apply_context_prefix(message, context)
 
     executor = build_agent_executor()
     token = _current_session_id.set(session_id)
@@ -181,5 +189,50 @@ async def run_agent(
             f"I ran into a technical issue: {exc}\n\n"
             "Please try rephrasing your question or ask me something else!"
         )
+    finally:
+        _current_session_id.reset(token)
+
+
+async def run_agent_stream(
+    message: str,
+    history: InMemoryChatMessageHistory,
+    context: dict | None = None,
+    session_id: str = "",
+):
+    """Async generator that yields the agent's final-answer text token-by-token.
+
+    Uses AgentExecutor.astream_events to surface only the LLM content chunks of the
+    final response. Tool-calling planning steps emit no content (only tool calls),
+    so they are naturally skipped. The full turn is persisted to history once the
+    stream completes, matching run_agent's behaviour.
+    """
+    message = _apply_context_prefix(message, context)
+
+    executor = build_agent_executor()
+    token = _current_session_id.set(session_id)
+    collected: list[str] = []
+    try:
+        async for event in executor.astream_events(
+            {"input": message, "chat_history": _windowed(history)},
+            version="v2",
+        ):
+            if event["event"] != "on_chat_model_stream":
+                continue
+            chunk = event["data"]["chunk"]
+            text = chunk.content
+            # OpenAI-compatible models stream content as a plain string; guard
+            # against providers that emit a list of content parts.
+            if isinstance(text, list):
+                text = "".join(
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in text
+                )
+            if text:
+                collected.append(text)
+                yield text
+
+        full = "".join(collected)
+        if full:
+            history.add_messages([HumanMessage(content=message), AIMessage(content=full)])
     finally:
         _current_session_id.reset(token)

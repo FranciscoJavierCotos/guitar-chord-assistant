@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -195,6 +195,49 @@ async def chat(request: Request, req: ChatRequest):
     except Exception as exc:
         logger.error(f"Agent error for session {req.session_id}: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/chat/stream", dependencies=[Depends(require_internal_token)])
+@limiter.limit("20/minute")  # per real client IP
+@limiter.limit("500/day", key_func=lambda: "global")  # global cap to protect the DeepSeek bill
+async def chat_stream(request: Request, req: ChatRequest):
+    """Streaming variant of /api/chat. Returns the agent's final answer as a
+    chunked text/plain stream so the frontend can render tokens as they arrive
+    instead of waiting for the whole response. The trailing ```json action block
+    (if any) streams inline at the end; the client parses it once complete."""
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY not configured on the server.")
+
+    try:
+        from agent.coach_agent import run_agent_stream
+        from agent.memory import get_history
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Agent modules not available: {e}")
+
+    history = get_history(req.session_id)
+
+    async def token_stream():
+        try:
+            async for chunk in run_agent_stream(
+                message=req.message,
+                history=history,
+                context=req.context.model_dump(),
+                session_id=req.session_id,
+            ):
+                yield chunk
+        except Exception as exc:
+            logger.error(f"Agent stream error for session {req.session_id}: {exc}", exc_info=True)
+            yield "\n\nI ran into a technical issue generating that response. Please try again."
+
+    return StreamingResponse(
+        token_stream(),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            # Defeat proxy/browser buffering so chunks reach the client immediately.
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/chord/{chord_name}", dependencies=[Depends(require_internal_token)])

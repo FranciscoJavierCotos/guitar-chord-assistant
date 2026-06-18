@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { BACKEND_URL, backendHeaders, relay } from "@/lib/serverBackend";
+import { BACKEND_URL, backendHeaders } from "@/lib/serverBackend";
 
 // Always run on the server at request time; never cache token-spending calls.
 export const dynamic = "force-dynamic";
@@ -7,12 +7,31 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.text();
-    const res = await fetch(`${BACKEND_URL}/api/chat`, {
+    const res = await fetch(`${BACKEND_URL}/api/chat/stream`, {
       method: "POST",
       headers: backendHeaders(req, { "Content-Type": "application/json" }),
       body,
     });
-    return relay(res);
+
+    // On error (auth, rate limit, 503…) the backend replies with a JSON body, not
+    // a stream — pass it through so the client can surface a sensible message.
+    if (!res.ok || !res.body) {
+      const text = await res.text();
+      return new Response(text, {
+        status: res.status,
+        headers: { "Content-Type": res.headers.get("content-type") || "application/json" },
+      });
+    }
+
+    // Pipe the backend's token stream straight to the browser, unbuffered.
+    return new Response(res.body, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+      },
+    });
   } catch {
     return NextResponse.json({ detail: "Failed to reach backend" }, { status: 502 });
   }
