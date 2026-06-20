@@ -13,6 +13,7 @@ Security model (the backend is deployed on a PUBLIC URL):
 - A request-size ceiling rejects oversized payloads.
 """
 
+import json
 import os
 import time
 import logging
@@ -201,10 +202,12 @@ async def chat(request: Request, req: ChatRequest):
 @limiter.limit("20/minute")  # per real client IP
 @limiter.limit("500/day", key_func=lambda: "global")  # global cap to protect the DeepSeek bill
 async def chat_stream(request: Request, req: ChatRequest):
-    """Streaming variant of /api/chat. Returns the agent's final answer as a
-    chunked text/plain stream so the frontend can render tokens as they arrive
-    instead of waiting for the whole response. The trailing ```json action block
-    (if any) streams inline at the end; the client parses it once complete."""
+    """Streaming variant of /api/chat. Returns the agent turn as a chunked
+    text/plain stream of NDJSON event frames (one JSON object per line):
+    {"type":"status",...} progress, {"type":"token",...} answer deltas, and
+    {"type":"error",...} on failure. The frontend shows the status line within
+    ~1-2s then renders tokens as they arrive. The trailing ```json action block
+    streams as token frames and is reassembled/parsed by the client once complete."""
     if not os.getenv("DEEPSEEK_API_KEY"):
         raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY not configured on the server.")
 
@@ -227,7 +230,10 @@ async def chat_stream(request: Request, req: ChatRequest):
                 yield chunk
         except Exception as exc:
             logger.error(f"Agent stream error for session {req.session_id}: {exc}", exc_info=True)
-            yield "\n\nI ran into a technical issue generating that response. Please try again."
+            yield json.dumps({
+                "type": "error",
+                "message": "I ran into a technical issue generating that response. Please try again.",
+            }) + "\n"
 
     return StreamingResponse(
         token_stream(),

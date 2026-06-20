@@ -39,16 +39,21 @@ function GuitarPickIcon() {
   );
 }
 
-function TypingIndicator() {
+function TypingIndicator({ label }: { label?: string }) {
   return (
-    <div className="flex gap-1 items-center h-5 px-1">
-      {[0, 1, 2].map((i) => (
-        <span
-          key={i}
-          className="w-2 h-2 rounded-full bg-[#9A8F78] animate-bounce"
-          style={{ animationDelay: `${i * 150}ms` }}
-        />
-      ))}
+    <div className="flex gap-2 items-center h-5 px-1">
+      <div className="flex gap-1 items-center">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            className="w-2 h-2 rounded-full bg-[#9A8F78] animate-bounce"
+            style={{ animationDelay: `${i * 150}ms` }}
+          />
+        ))}
+      </div>
+      {label && (
+        <span className="text-xs text-[#9A8F78] italic animate-fade-in">{label}</span>
+      )}
     </div>
   );
 }
@@ -56,7 +61,9 @@ function TypingIndicator() {
 export default function MessageBubble({ message }: Props) {
   const isUser = message.role === "user";
   const displayContent = isUser ? message.content : stripActionBlock(message.content);
-  const isTyping = message.content === "__typing__";
+  // Show the typing indicator (optionally with a live status label) while the
+  // agent is working and no answer text has streamed in yet.
+  const isTyping = message.content === "__typing__" || (!!message.status && !message.content);
 
   return (
     <div className={`flex gap-2 mb-4 ${isUser ? "justify-end" : "justify-start"} animate-fade-in`}>
@@ -74,7 +81,7 @@ export default function MessageBubble({ message }: Props) {
         }`}
       >
         {isTyping ? (
-          <TypingIndicator />
+          <TypingIndicator label={message.status} />
         ) : isUser ? (
           <p className="whitespace-pre-wrap">{displayContent}</p>
         ) : (
