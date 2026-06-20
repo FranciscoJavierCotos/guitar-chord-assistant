@@ -151,10 +151,19 @@ export default function Chat({ onProgressionUpdate }: Props) {
 
   async function sendMessage(text: string) {
     if (isAtLimit) return;
+    const assistantId = uuidv4();
     const userMsg: ChatMessage = { id: uuidv4(), role: "user", content: text, timestamp: Date.now() };
-    const typingMsg: ChatMessage = { id: "typing", role: "assistant", content: "__typing__", timestamp: Date.now() };
+    // Placeholder carries a live status label (no content yet) so the bubble shows
+    // the typing indicator + "Thinking…" until the first answer token streams in.
+    const placeholder: ChatMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      status: "Thinking…",
+      timestamp: Date.now(),
+    };
 
-    setMessages((prev) => [...prev, userMsg, typingMsg]);
+    setMessages((prev) => [...prev, userMsg, placeholder]);
     setLoading(true);
     setInput("");
 
@@ -173,50 +182,74 @@ export default function Chat({ onProgressionUpdate }: Props) {
         throw new Error(`Server responded with ${res.status}`);
       }
 
-      // Stream the response token-by-token so text appears as it's generated
-      // instead of after the full ~25s agent run completes.
-      const assistantId = uuidv4();
+      // The stream is NDJSON: one JSON event frame per line. Status frames show
+      // progress; token frames carry answer-text deltas; an error frame replaces
+      // the message text. Parse line-by-line so text appears as it's generated.
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = "";
       let responseText = "";
-      let started = false;
+
+      const applyFrame = (frame: { type?: string; label?: string; text?: string; message?: string }) => {
+        if (frame.type === "status") {
+          // Only surface status until the answer starts streaming.
+          if (!responseText) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, status: frame.label } : m)),
+            );
+          }
+        } else if (frame.type === "token" && frame.text) {
+          responseText += frame.text;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: responseText, status: undefined } : m,
+            ),
+          );
+        } else if (frame.type === "error") {
+          responseText = frame.message ?? "Sorry, something went wrong.";
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: responseText, status: undefined } : m,
+            ),
+          );
+        }
+      };
+
+      const drainBuffer = (flush = false) => {
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (line) {
+            try { applyFrame(JSON.parse(line)); } catch { /* skip malformed line */ }
+          }
+        }
+        if (flush) {
+          const line = buffer.trim();
+          buffer = "";
+          if (line) {
+            try { applyFrame(JSON.parse(line)); } catch { /* skip malformed line */ }
+          }
+        }
+      };
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        responseText += decoder.decode(value, { stream: true });
-        if (!started) {
-          // First chunk: swap the typing indicator for the live message.
-          started = true;
-          const assistantMsg: ChatMessage = {
-            id: assistantId,
-            role: "assistant",
-            content: responseText,
-            timestamp: Date.now(),
-          };
-          setMessages((prev) => prev.filter((m) => m.id !== "typing").concat(assistantMsg));
-        } else {
-          setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, content: responseText } : m)),
-          );
-        }
+        buffer += decoder.decode(value, { stream: true });
+        drainBuffer();
       }
-      responseText += decoder.decode();
+      buffer += decoder.decode();
+      drainBuffer(true);
 
-      if (!started) {
-        // Stream finished with no content — fall back to a placeholder.
-        responseText = responseText || "Sorry, I didn't get a response.";
-        const assistantMsg: ChatMessage = {
-          id: assistantId,
-          role: "assistant",
-          content: responseText,
-          timestamp: Date.now(),
-        };
-        setMessages((prev) => prev.filter((m) => m.id !== "typing").concat(assistantMsg));
-      } else {
+      if (!responseText) {
+        // Stream finished with no token frames — fall back to a placeholder.
+        responseText = "Sorry, I didn't get a response.";
         setMessages((prev) =>
-          prev.map((m) => (m.id === assistantId ? { ...m, content: responseText } : m)),
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, content: responseText, status: undefined } : m,
+          ),
         );
       }
 
@@ -233,7 +266,7 @@ export default function Chat({ onProgressionUpdate }: Props) {
           "Please try again in a moment.",
         timestamp: Date.now(),
       };
-      setMessages((prev) => prev.filter((m) => m.id !== "typing").concat(errorMsg));
+      setMessages((prev) => prev.filter((m) => m.id !== assistantId).concat(errorMsg));
     } finally {
       setLoading(false);
     }

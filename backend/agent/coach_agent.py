@@ -3,6 +3,7 @@ ChordCoach LangChain agent — uses native tool calling (function calling API)
 instead of text-based ReAct, which is more reliable and uses fewer LLM calls.
 """
 
+import json
 import os
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_tool_calling_agent
@@ -107,6 +108,27 @@ If showing a single chord for explanation, use:
 Keep responses focused, practical, and inspiring."""
 
 
+# Friendly, present-tense status labels shown in the chat bubble while the agent is
+# working, keyed by tool name (matches the @tool function names in agent/tools.py).
+# These fill the otherwise-blank "thinking" window before the final answer streams.
+TOOL_STATUS_LABELS = {
+    "find_song_chords": "Searching the web for the real chords…",
+    "get_progressions_by_key_tool": "Finding progressions in that key…",
+    "get_progressions_by_genre_tool": "Finding progressions for that style…",
+    "get_progressions_by_mood_tool": "Finding progressions for that mood…",
+    "get_scale_chords": "Working out the scale's chords…",
+    "explain_theory": "Working through the theory…",
+    "suggest_next_chord": "Thinking about the next chord…",
+    "transpose_chords": "Transposing the chords…",
+    "get_finger_placement_guide": "Writing the finger-placement guide…",
+    "get_chord_info": "Looking up the chord shape…",
+    "log_practice_session": "Saving this to your practice log…",
+    "get_practice_log": "Pulling up your practice history…",
+    "set_user_skill_level": "Adjusting to your skill level…",
+}
+DEFAULT_TOOL_LABEL = "Working on it…"
+
+
 def build_agent_executor() -> AgentExecutor:
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
@@ -198,18 +220,31 @@ async def run_agent(
         _current_session_id.reset(token)
 
 
+def _frame(payload: dict) -> str:
+    """Serialise one NDJSON event frame (a JSON object on its own line). JSON
+    encoding escapes newlines inside token text, so the client can split on '\n'."""
+    return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
 async def run_agent_stream(
     message: str,
     history: InMemoryChatMessageHistory,
     context: dict | None = None,
     session_id: str = "",
 ):
-    """Async generator that yields the agent's final-answer text token-by-token.
+    """Async generator that yields the agent turn as NDJSON event frames.
 
-    Uses AgentExecutor.astream_events to surface only the LLM content chunks of the
-    final response. Tool-calling planning steps emit no content (only tool calls),
-    so they are naturally skipped. The full turn is persisted to history once the
-    stream completes, matching run_agent's behaviour.
+    Frame types (one JSON object per line):
+      {"type":"status","label":...}  progress shown while the agent works
+      {"type":"token","text":...}    a final-answer text delta
+      {"type":"error","message":...} a failure (emitted by the caller)
+
+    Uses AgentExecutor.astream_events: an immediate "Thinking…" status covers the
+    initial planning call, on_tool_start emits a per-tool status to fill the
+    otherwise-blank tool window, and on_chat_model_stream surfaces the final
+    answer's content chunks token-by-token (planning steps emit only tool calls,
+    no content, so they're naturally skipped). The full turn is persisted to
+    history once the stream completes, matching run_agent's behaviour.
     """
     message = _apply_context_prefix(message, context)
 
@@ -217,11 +252,19 @@ async def run_agent_stream(
     token = _current_session_id.set(session_id)
     collected: list[str] = []
     try:
+        # Immediate feedback so the bubble isn't blank during the first planning call.
+        yield _frame({"type": "status", "label": "Thinking…"})
+
         async for event in executor.astream_events(
             {"input": message, "chat_history": _windowed(history)},
             version="v2",
         ):
-            if event["event"] != "on_chat_model_stream":
+            kind = event["event"]
+            if kind == "on_tool_start":
+                label = TOOL_STATUS_LABELS.get(event.get("name", ""), DEFAULT_TOOL_LABEL)
+                yield _frame({"type": "status", "label": label})
+                continue
+            if kind != "on_chat_model_stream":
                 continue
             chunk = event["data"]["chunk"]
             text = chunk.content
@@ -234,7 +277,7 @@ async def run_agent_stream(
                 )
             if text:
                 collected.append(text)
-                yield text
+                yield _frame({"type": "token", "text": text})
 
         full = "".join(collected)
         if full:

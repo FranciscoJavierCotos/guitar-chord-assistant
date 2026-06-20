@@ -34,6 +34,9 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   timestamp: number;
+  // Transient progress label shown while the agent works, before answer tokens
+  // arrive (e.g. "Searching the web…"). Cleared once content starts streaming.
+  status?: string;
 }
 
 export interface AgentAction {
