@@ -121,6 +121,11 @@ def build_agent_executor() -> AgentExecutor:
         base_url="https://api.deepseek.com/v1",
         temperature=0.7,
         max_tokens=2048,
+        # Required for token-by-token streaming. Without this, langchain calls
+        # DeepSeek in non-streaming mode, so AgentExecutor.astream_events surfaces
+        # the whole final answer as a single chunk at the end (~25s wait) instead
+        # of streaming it as it's generated. See run_agent_stream.
+        streaming=True,
     )
 
     prompt = ChatPromptTemplate.from_messages([
