@@ -49,7 +49,7 @@ Browser
   |                  components/ChordDiagram.tsx  hand-coded SVG renderer (no library)
   |                  lib/types.ts            shared TypeScript interfaces
   |
-  |── POST /api/chat/stream ──> FastAPI (port 8000)   token-streamed reply
+  |── POST /api/chat/stream ──> FastAPI (port 8000)   NDJSON event-frame stream (status/token)
                          main.py             routes, CORS, request logging
                          agent/coach_agent.py  LangChain AgentExecutor + system prompt
                          agent/tools.py        13 @tool functions
@@ -81,10 +81,24 @@ The chord diagram panel renders from that verified data — not from LLM output.
 means the LLM can describe chords in any prose style while the visual layer stays grounded in
 the authoritative database.
 
-Because the reply is **streamed** token-by-token, `Chat.tsx` accumulates chunks into the live
-message and only parses the action block once the stream finishes (the full JSON has arrived).
-`MessageBubble` strips both completed and still-unterminated trailing `json fences, so the raw
-JSON never flashes on screen mid-stream.
+Because the reply is **streamed**, `/api/chat/stream` sends **NDJSON event frames** — one JSON
+object per line — rather than raw text:
+
+```
+{"type":"status","label":"Searching the web…"}   ← progress shown while the agent works
+{"type":"token","text":"Let me"}                  ← one answer-text delta
+{"type":"error","message":"…"}                    ← emitted on failure
+```
+
+A leading `status` frame (`"Thinking…"`) is sent immediately, and each agent `on_tool_start`
+emits a friendly per-tool `status` (e.g. `"Searching the web for the real chords…"`), so the
+chat bubble shows live activity within ~1–2s instead of sitting blank during the agent's
+planning/tool window. `Chat.tsx` parses the stream line-by-line: it renders the `status` label
+under a typing indicator until the first `token` arrives, then appends `token` deltas into the
+live message. The trailing action block streams as `token` frames and is reassembled, so
+`Chat.tsx` still parses it with the same regex once the stream finishes (the full JSON has
+arrived). `MessageBubble` strips both completed and still-unterminated trailing ` ```json `
+fences, so the raw JSON never flashes on screen mid-stream.
 
 ### Agent Design: Native Function Calling, Not ReAct
 
@@ -209,7 +223,7 @@ Verify chord diagrams in isolation (no backend needed): `http://localhost:3000/t
 |---|---|---|---|
 | `/api/health` | GET | open | Health check (Render health probe) |
 | `/api/chat` | POST | token | Send message to the AI agent; returns the full reply as JSON `{response, session_id}` (rate-limited) |
-| `/api/chat/stream` | POST | token | Same body as `/api/chat`; streams the reply token-by-token as chunked `text/plain` so it renders as it's generated. Used by the frontend. Same rate limits. |
+| `/api/chat/stream` | POST | NDJSON | Same body as `/api/chat`; streams the reply as chunked `text/plain` **NDJSON event frames** (`status` / `token` / `error`, one JSON object per line) so progress and answer text render as they're generated. Used by the frontend. Same rate limits. |
 | `/api/chord/{name}` | GET | token | Chord fingering data (e.g. `Am`, `G7`, `Bm`) |
 | `/api/chords` | GET | token | All chords in the database |
 | `/api/progressions` | GET | token | All progressions; filter with `?genre=blues` or `?key=E` |
@@ -378,6 +392,25 @@ dashboard for `chordcoach-frontend`. No code change was required.
 `BACKEND_URL` begins with `https://`. The `fromService` Blueprint wiring (which sets it to the
 bare hostname `chordcoach-backend.onrender.com`) is handled correctly by the code — it is only
 risky if the variable is edited manually in the dashboard.
+
+### 8. Chat reply showed ~20 s of blank typing dots, then burst in (streaming UX)
+
+**Symptom.** After sending a message the typing indicator sat blank for ~20 s, then the whole
+answer appeared at once — it looked broken rather than streamed. The streaming chain was already
+wired correctly end-to-end, so the mechanics weren't at fault.
+
+**Root cause.** Time-to-first-token. `/api/chat/stream` only yielded the agent's *final-answer*
+tokens (`on_chat_model_stream`). Before that answer exists, the `AgentExecutor` runs sequential
+DeepSeek planning calls plus tool executions (and, for songs, a slow web search). During that
+~15–20 s window there is genuinely no user-facing text to stream, so the bubble stayed blank;
+then the short final answer streamed in a couple of seconds and read as a sudden burst.
+
+**Fix.** Upgraded `/api/chat/stream` from a raw token-text stream to **NDJSON event frames**
+(`agent/coach_agent.py` `run_agent_stream`): an immediate `status` `"Thinking…"` frame, a
+per-tool `status` frame on each `on_tool_start` (mapped via `TOOL_STATUS_LABELS`), and `token`
+frames for the answer deltas. `Chat.tsx` parses the stream line-by-line and shows the live status
+under the typing indicator until the first token arrives. The trailing action JSON still
+reassembles from `token` frames, so the chord-panel contract is unchanged.
 
 ---
 
