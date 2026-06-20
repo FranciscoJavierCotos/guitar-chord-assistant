@@ -3,6 +3,8 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { ChatMessage, AgentAction, ActiveProgression, ChordPosition } from "@/lib/types";
+import { parseAgentAction } from "@/lib/agentAction";
+import { createNdjsonParser } from "@/lib/streamFrames";
 import MessageBubble from "./MessageBubble";
 import PracticeLog from "./PracticeLog";
 
@@ -31,16 +33,6 @@ const WELCOME_MESSAGE: ChatMessage = {
     "What would you like to learn today?",
   timestamp: Date.now(),
 };
-
-function parseAgentAction(text: string): AgentAction | null {
-  const match = text.match(/```json\s*(\{[\s\S]*?"action"\s*:[\s\S]*?\})\s*```/);
-  if (!match) return null;
-  try {
-    return JSON.parse(match[1]) as AgentAction;
-  } catch {
-    return null;
-  }
-}
 
 interface Props {
   onProgressionUpdate: (prog: ActiveProgression | null) => void;
@@ -187,7 +179,6 @@ export default function Chat({ onProgressionUpdate }: Props) {
       // the message text. Parse line-by-line so text appears as it's generated.
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = "";
       let responseText = "";
 
       const applyFrame = (frame: { type?: string; label?: string; text?: string; message?: string }) => {
@@ -215,33 +206,16 @@ export default function Chat({ onProgressionUpdate }: Props) {
         }
       };
 
-      const drainBuffer = (flush = false) => {
-        let nl: number;
-        while ((nl = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, nl).trim();
-          buffer = buffer.slice(nl + 1);
-          if (line) {
-            try { applyFrame(JSON.parse(line)); } catch { /* skip malformed line */ }
-          }
-        }
-        if (flush) {
-          const line = buffer.trim();
-          buffer = "";
-          if (line) {
-            try { applyFrame(JSON.parse(line)); } catch { /* skip malformed line */ }
-          }
-        }
-      };
+      const parser = createNdjsonParser(applyFrame);
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        drainBuffer();
+        parser.push(decoder.decode(value, { stream: true }));
       }
-      buffer += decoder.decode();
-      drainBuffer(true);
+      parser.push(decoder.decode());
+      parser.flush();
 
       if (!responseText) {
         // Stream finished with no token frames — fall back to a placeholder.

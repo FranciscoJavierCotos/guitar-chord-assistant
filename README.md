@@ -210,6 +210,37 @@ Verify chord diagrams in isolation (no backend needed): `http://localhost:3000/t
 
 ---
 
+## Testing
+
+Both services have automated test suites that run in CI (GitHub Actions,
+`.github/workflows/ci.yml`) on every pull request and push to `main`.
+
+**Backend** — pytest, covering the API routes, theory engine, session memory,
+and chord/progression data integrity:
+
+```bash
+cd chord-coach/backend
+pip install -r requirements-dev.txt   # requirements.txt + pytest
+pytest -q
+```
+
+**Frontend** — Vitest, covering the structured-output (`AgentAction`) parser,
+the NDJSON stream-frame reassembly, and the server→backend header/URL helpers:
+
+```bash
+cd chord-coach/frontend
+npm install
+npm test                 # vitest run (one-shot)
+npm run test:watch       # watch mode
+npm run test:coverage    # with a coverage report
+```
+
+CI runs the two suites as independent jobs gated by path filters (backend
+changes don't trigger the frontend job and vice-versa), with a final `ci`
+aggregator job suitable for a required branch-protection check.
+
+---
+
 ## API Reference
 
 > **Auth:** every endpoint except `/api/health` requires the header

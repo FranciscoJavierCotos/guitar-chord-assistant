@@ -13,7 +13,7 @@ import type { NextRequest } from "next/server";
  * `host` property — a bare hostname with no scheme — so we prepend https:// when
  * a scheme is absent. Locally it's a full http://localhost URL and passes through.
  */
-function resolveBackendUrl(): string {
+export function resolveBackendUrl(): string {
   const raw = (process.env.BACKEND_URL || "http://localhost:8000").trim();
   if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, "");
   return `https://${raw}`.replace(/\/+$/, "");
