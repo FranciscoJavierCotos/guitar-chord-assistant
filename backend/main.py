@@ -30,6 +30,8 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+import observability
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -93,7 +95,21 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """Emit a rate-limit metric, then delegate to slowapi's 429 response."""
+    observability.record_rate_limit_rejection()
+    return _rate_limit_exceeded_handler(request, exc)
+
+
+app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
+
+# Opt-in OpenTelemetry: no-op unless OTEL_ENABLED + an OTLP endpoint are set.
+# Auto-instruments FastAPI (server spans + RED metrics per route); manual agent
+# and per-tool spans/metrics live in agent/ and are always emitted via the OTel
+# API (which is a no-op until this installs a real provider).
+observability.setup_observability(app)
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 # Browser traffic goes through the Next.js server (same-origin), so CORS is a
