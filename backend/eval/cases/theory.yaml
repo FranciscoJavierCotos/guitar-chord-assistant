@@ -1,0 +1,40 @@
+# Music-theory questions. These lean on the LLM judge for correctness; where the
+# agent shows chords, they must still be valid and (where stated) diatonic.
+
+- id: theory-why-axis
+  prompt: "Why does the I-V-vi-IV progression sound so good in pop music?"
+  tags: [theory]
+  judge:
+    rubric: >
+      Must correctly explain the I-V-vi-IV progression (smooth voice leading,
+      shared tones, tension/resolution). Should be accurate music theory, not
+      hand-waving. Any chords shown must be musically correct.
+
+- id: theory-scale-chords-g
+  prompt: "What chords are in the key of G major?"
+  tags: [theory, scale]
+  expect:
+    chords_in_db: true
+    key: G
+  judge:
+    rubric: >
+      Must list the diatonic chords of G major (G, Am, Bm, C, D, Em, F#dim) with
+      correct qualities. Roman numerals are a plus.
+
+- id: theory-explain-vi-iv-i-v
+  prompt: "Explain the music theory behind the Am-F-C-G progression."
+  tags: [theory]
+  expect:
+    chords_in_db: true
+  judge:
+    rubric: >
+      Must recognize Am-F-C-G as vi-IV-I-V in C major (not A minor) and explain
+      the chord functions and why it works. Roman numerals should be correct.
+
+- id: theory-dominant7
+  prompt: "What is a dominant 7th chord and why does it create tension?"
+  tags: [theory]
+  judge:
+    rubric: >
+      Must correctly explain that a dominant 7th contains a major triad plus a
+      minor 7th (the tritone) and resolves to the tonic (V7 -> I).

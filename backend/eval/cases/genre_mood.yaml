@@ -1,0 +1,49 @@
+# Progressions requested by genre or mood. The key is the agent's choice, so we
+# don't assert a key — only that a valid, non-hallucinated progression is shown.
+
+- id: prog-jazz-genre
+  prompt: "Recommend a jazz chord progression I can practice."
+  tags: [progression, genre, jazz]
+  expect:
+    action: show_chords
+    chords_in_db: true
+    min_chords: 2
+  judge:
+    rubric: >
+      Must give a genuinely jazz progression (e.g. a ii-V-I) with appropriate
+      7th/extended chords, and explain why it sounds like jazz.
+
+- id: prog-sad-mood
+  prompt: "I'm in a melancholic mood. Give me a sad-sounding progression."
+  tags: [progression, mood]
+  expect:
+    action: show_chords
+    chords_in_db: true
+    min_chords: 3
+  judge:
+    rubric: >
+      Must give a progression that genuinely sounds sad/melancholic (minor-heavy)
+      and explain the emotional character.
+
+- id: prog-energetic-rock
+  prompt: "Give me an energetic rock progression to jam on."
+  tags: [progression, genre, rock]
+  expect:
+    action: show_chords
+    chords_in_db: true
+    min_chords: 3
+  judge:
+    rubric: >
+      Must give a driving rock progression and explain why it feels energetic.
+
+- id: prog-reggae-genre
+  prompt: "What's a good reggae chord progression?"
+  tags: [progression, genre, reggae]
+  expect:
+    action: show_chords
+    chords_in_db: true
+    min_chords: 2
+  judge:
+    rubric: >
+      Must give a reggae-appropriate progression and note the characteristic
+      off-beat feel.

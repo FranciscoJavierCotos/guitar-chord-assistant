@@ -1,0 +1,3 @@
+# Generated eval reports are artifacts, not source.
+*.json
+!.gitignore

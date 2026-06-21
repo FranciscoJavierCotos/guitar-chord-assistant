@@ -1,0 +1,66 @@
+# Follow-up turns that depend on prior conversation context (seeded via history)
+# or the session context block. These exercise the agent's use of memory.
+
+- id: followup-next-chord
+  prompt: "Nice. What chord could come next after that?"
+  tags: [followup, theory, context]
+  history:
+    - role: user
+      content: "Give me a pop progression in C."
+    - role: assistant
+      content: >
+        Here's a classic one: C - G - Am - F (I-V-vi-IV). It's bright and
+        uplifting and loops forever.
+  judge:
+    rubric: >
+      Must suggest a sensible next chord to extend or resolve C-G-Am-F, using the
+      conversation context (it should know the progression being discussed).
+
+- id: followup-capo-version
+  prompt: "That key is too hard for me. Can you give me an easier capo version with open chords?"
+  tags: [followup, transpose, context]
+  history:
+    - role: user
+      content: "How do I play Sailor Song by Gigi Perez?"
+    - role: assistant
+      content: >
+        Sailor Song is in B major and uses B - G#m - E - F#. Those need barre
+        chords.
+  expect:
+    chords_in_db: true
+  judge:
+    rubric: >
+      Must offer a capo solution that turns the barre-chord progression into open
+      shapes, stating the capo fret clearly and keeping it musically equivalent.
+
+- id: followup-context-key
+  prompt: "Give me a progression I can play right now."
+  tags: [followup, context, key]
+  context:
+    key: E
+    scale: Major
+    skill_level: beginner
+  expect:
+    action: show_chords
+    key: E
+    chords_in_db: true
+    min_chords: 3
+  judge:
+    rubric: >
+      Must honor the session context (key of E, beginner) and give a usable
+      E-based progression with open/beginner chords.
+
+- id: followup-make-it-sadder
+  prompt: "Can you make that progression sound sadder?"
+  tags: [followup, mood, context]
+  history:
+    - role: user
+      content: "Give me a happy progression in C."
+    - role: assistant
+      content: "Try C - G - Am - F — bright and cheerful."
+  expect:
+    chords_in_db: true
+  judge:
+    rubric: >
+      Must adjust toward a sadder/minor feel (e.g. starting on Am or adding minor
+      chords) while staying relevant to the previous C-based progression.

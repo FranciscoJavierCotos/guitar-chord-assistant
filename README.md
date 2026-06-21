@@ -56,6 +56,7 @@ Browser
                          agent/memory.py       in-process session store, 2-hour TTL
                          data/chords.py        40+ chord fingering definitions
                          data/progressions.py  30+ named progressions
+                         eval/                 offline agent eval (python -m eval)
 ```
 
 ### Structured Output Protocol
@@ -238,6 +239,75 @@ npm run test:coverage    # with a coverage report
 CI runs the two suites as independent jobs gated by path filters (backend
 changes don't trigger the frontend job and vice-versa), with a final `ci`
 aggregator job suitable for a required branch-protection check.
+
+---
+
+## Evaluation
+
+Unit tests cover the deterministic plumbing, but they can't tell you whether the
+**agent's answers are any good**. A change to the system prompt, the model, the
+tool set, or a tool's docstring can silently regress answer quality — wrong
+chords, hallucinated fingerings, or an invalid `AgentAction` block that breaks the
+chord panel — while every unit test stays green. The offline **eval harness**
+(`backend/eval/`) closes that gap: it runs a curated **golden set** of prompts
+through the real agent and scores each response.
+
+**Two grader families:**
+
+- **Deterministic graders** (`eval/graders/deterministic.py`) — fast, free, no
+  LLM. They check the objective contract:
+  - the trailing `AgentAction` JSON block parses and validates (mirrors
+    `frontend/lib/types.ts` and the system-prompt contract);
+  - **no hallucinated chords** — every chord the action references exists in
+    `data/chords.py`;
+  - any named progression resolves against `data/progressions.py`;
+  - requested **key** (chords diatonic by root) and **chord-count** constraints
+    are honored.
+- **LLM-as-judge** (`eval/graders/judge.py`) — scores the subjective dimensions
+  (musical correctness, relevance, explanation quality) on a 1–5 scale against a
+  per-case rubric, with a structured score + rationale. The judge model is
+  **pinned and configurable** (`EVAL_JUDGE_MODEL` / `EVAL_JUDGE_BASE_URL` /
+  `EVAL_JUDGE_API_KEY`, defaulting to DeepSeek and `DEEPSEEK_API_KEY`); a case
+  passes the judge when its mean dimension score ≥ 3.5.
+
+**Golden set** — 20 version-controlled cases in `backend/eval/cases/*.yaml`
+(single chords, progressions by key/genre/mood, theory questions, and follow-ups
+that use session context/history). Each case carries the prompt, optional
+`context`/`history`, objective `expect` constraints, and a judge `rubric`.
+
+**Run it:**
+
+```bash
+cd chord-coach/backend
+pip install -r requirements-dev.txt
+export DEEPSEEK_API_KEY=...           # the agent (and, by default, the judge) need it
+
+python -m eval                        # full run: agent + deterministic + judge
+python -m eval --no-judge             # deterministic graders only (still calls the agent)
+python -m eval --limit 5 --threshold 0.9 --judge-threshold 0.85
+```
+
+The runner writes a machine-readable report to `backend/eval/reports/report.json`
+and prints a per-grader summary. It **exits non-zero** when the deterministic
+case pass rate drops below `--threshold` (default 0.85) or the judge pass rate
+below `--judge-threshold` (default 0.80), so a regression surfaces loudly.
+
+**Adding a case:** drop a new entry into any `eval/cases/*.yaml`. Set `expect`
+for whatever is objectively checkable (don't over-constrain — e.g. assert the
+requested `key` but not a specific progression when several would be valid), and
+write a `judge.rubric` describing what a good answer must do. The offline tests
+in `tests/test_eval.py` validate that every case is well-formed and that any
+`chord_ids` you assert actually exist in the dataset.
+
+**CI gating** — because the full eval makes real (paid) LLM calls, it is split:
+
+- the **deterministic graders run on every PR** with no network, via
+  `tests/test_eval.py` in the normal `backend` pytest job (the one wired into the
+  `ci` aggregator), grading fixture responses;
+- the **full agent + judge eval** runs only on **pushes to `main`** and manual
+  **`workflow_dispatch`** (`eval` job in `.github/workflows/ci.yml`), using the
+  `DEEPSEEK_API_KEY` repo secret, failing under the configurable pass-rate
+  thresholds and uploading the JSON report as a build artifact.
 
 ---
 

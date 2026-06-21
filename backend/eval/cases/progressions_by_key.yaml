@@ -1,0 +1,57 @@
+# Progressions requested in a specific key. The chords shown must fit the key
+# (diatonic by root) and exist in the dataset.
+
+- id: prog-blues-e
+  prompt: "Give me a 12-bar blues progression in the key of E."
+  tags: [progression, key, blues]
+  expect:
+    action: show_chords
+    key: E
+    chords_in_db: true
+    min_chords: 3
+    chord_ids: ["E7", "A7", "B7"]
+  judge:
+    rubric: >
+      Must give a real 12-bar blues in E using the I7-IV7-V7 chords (E7, A7,
+      B7). Should briefly explain the blues form and feel.
+
+- id: prog-pop-c
+  prompt: "I want a happy pop progression in C major."
+  tags: [progression, key, pop]
+  expect:
+    action: show_chords
+    key: C
+    chords_in_db: true
+    min_chords: 3
+  judge:
+    rubric: >
+      Must give a pop progression in C major (e.g. a I-V-vi-IV variant) with all
+      chords diatonic to C. Should explain why it sounds happy/uplifting.
+
+- id: prog-folk-d
+  prompt: "Suggest a folk progression in the key of D."
+  tags: [progression, key, folk]
+  expect:
+    action: show_chords
+    key: D
+    chords_in_db: true
+    min_chords: 3
+  judge:
+    rubric: >
+      Must give a folk-appropriate progression in D with diatonic chords and a
+      short note on its feel.
+
+- id: prog-g-general
+  prompt: "Give me a chord progression in G that's good for a beginner."
+  tags: [progression, key, beginner]
+  context:
+    skill_level: beginner
+  expect:
+    action: show_chords
+    key: G
+    chords_in_db: true
+    min_chords: 3
+  judge:
+    rubric: >
+      Must give a beginner-friendly progression in G using open chords (no barre
+      chords). All chords diatonic to G.

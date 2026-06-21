@@ -1,0 +1,50 @@
+# Single-chord lookups — the agent should emit a `show_chord` block for the
+# requested chord and finger it correctly. Chords must exist in data/chords.py.
+
+- id: chord-f-fingering
+  prompt: "How do I play the F chord on guitar?"
+  tags: [single-chord, fingering]
+  expect:
+    action: show_chord
+    chord_ids: ["F"]
+    chords_in_db: true
+  judge:
+    rubric: >
+      Must give a step-by-step finger-placement guide for the F major chord
+      (a barre chord). Should mention barring the first fret and common
+      mistakes. The chord shown must be F, not a substitute.
+
+- id: chord-am-fingering
+  prompt: "Show me how to finger an A minor chord."
+  tags: [single-chord, fingering]
+  expect:
+    action: show_chord
+    chord_ids: ["Am"]
+    chords_in_db: true
+  judge:
+    rubric: >
+      Must explain the open A minor shape with accurate string/fret placement.
+
+- id: chord-cmaj7-info
+  prompt: "What is a Cmaj7 chord and how do I play it?"
+  tags: [single-chord, theory]
+  expect:
+    action: show_chord
+    chord_ids: ["Cmaj7"]
+    chords_in_db: true
+  judge:
+    rubric: >
+      Must describe the dreamy/sophisticated character of a major 7th chord and
+      give a correct Cmaj7 fingering.
+
+- id: chord-bm-fingering
+  prompt: "How do I play Bm? I keep getting buzzing strings."
+  tags: [single-chord, fingering]
+  expect:
+    action: show_chord
+    chord_ids: ["Bm"]
+    chords_in_db: true
+  judge:
+    rubric: >
+      Must give a correct B minor fingering and practical advice for clean
+      barre/fretting to address buzzing.

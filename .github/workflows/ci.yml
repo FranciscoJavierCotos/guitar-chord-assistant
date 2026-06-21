@@ -4,6 +4,16 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      eval_threshold:
+        description: "Min deterministic case pass rate (0-1)"
+        required: false
+        default: "0.85"
+      eval_judge_threshold:
+        description: "Min LLM-judge case pass rate (0-1)"
+        required: false
+        default: "0.80"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -65,6 +75,47 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm test
+
+  # Full offline eval: runs the golden set through the real agent + LLM judge.
+  # Costs real DeepSeek calls, so it is NOT run on every PR — only on pushes to
+  # main and manual workflow_dispatch. The cheap DETERMINISTIC graders DO run on
+  # every PR, via tests/test_eval.py in the `backend` pytest job above (no network),
+  # which is what feeds the `ci` aggregator. This job is intentionally independent
+  # of that aggregator so a missing secret on a fork PR can't block merges.
+  eval:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Run offline eval (agent + LLM judge)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          EVAL_JUDGE_MODEL: ${{ vars.EVAL_JUDGE_MODEL }}
+        run: |
+          if [ -z "$DEEPSEEK_API_KEY" ]; then
+            echo "::error::DEEPSEEK_API_KEY secret is not set; cannot run the eval."
+            exit 1
+          fi
+          python -m eval \
+            --threshold "${{ github.event.inputs.eval_threshold || '0.85' }}" \
+            --judge-threshold "${{ github.event.inputs.eval_judge_threshold || '0.80' }}" \
+            --out eval/reports/report.json
+      - name: Upload eval report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: backend/eval/reports/report.json
+          if-no-files-found: ignore
 
   # Single stable status check to require in branch protection. Always runs and
   # depends on the conditional jobs, so a PR that skips one (path filter) still
