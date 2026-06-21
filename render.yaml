@@ -22,6 +22,18 @@ services:
         generateValue: true # Render generates a strong random value
       - key: FRONTEND_URL
         sync: false # set to the real frontend URL after first deploy, then redeploy
+      # ─── Observability (opt-in OpenTelemetry → Grafana Cloud) ─────────────────
+      # All optional: leave unset and instrumentation is a no-op. Set OTEL_ENABLED
+      # plus the OTLP endpoint+headers in the dashboard to start exporting.
+      # See observability/README.md.
+      - key: OTEL_ENABLED
+        sync: false # set to "true" in the dashboard to turn export on
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false # Grafana Cloud OTLP gateway URL (.../otlp)
+      - key: OTEL_EXPORTER_OTLP_HEADERS
+        sync: false # "Authorization=Basic <base64(instanceID:token)>" — secret
+      - key: OTEL_SERVICE_NAME
+        value: chordcoach-backend
 
   # ─── Public frontend (Next.js) ───────────────────────────────────────────────
   - type: web

@@ -57,6 +57,9 @@ Browser
                          data/chords.py        40+ chord fingering definitions
                          data/progressions.py  30+ named progressions
                          eval/                 offline agent eval (python -m eval)
+                         observability.py      opt-in OpenTelemetry (spans + metrics)
+
+observability/           Grafana dashboard JSON + observability runbook
 ```
 
 ### Structured Output Protocol
@@ -159,6 +162,7 @@ conversation survives page refreshes within the same browser tab.
 | Markdown | `react-markdown` + `remark-gfm` | — |
 | Diagrams | Hand-coded SVG React component | no library |
 | API hardening | `slowapi` rate limiting + shared-secret auth | — |
+| Observability | OpenTelemetry (SDK + OTLP/HTTP + FastAPI auto-instr.) → Grafana Cloud (opt-in) | — |
 | Deploy | Render (two public Web Services, `render.yaml` Blueprint) | — |
 
 ---
@@ -323,6 +327,48 @@ in `tests/test_eval.py` validate that every case is well-formed and that any
   **`workflow_dispatch`** (`eval` job in `.github/workflows/ci.yml`), using the
   `DEEPSEEK_API_KEY` repo secret, failing under the configurable pass-rate
   thresholds and uploading the JSON report as a build artifact.
+
+---
+
+## Observability
+
+The backend is instrumented with **OpenTelemetry** and can export **traces and
+metrics** to the **Grafana Cloud free tier** (Tempo for traces, Mimir for
+metrics) over a single OTLP/HTTP endpoint. It answers the questions a public LLM
+agent otherwise can't: *how slow is `/api/chat/stream` at p95? how many DeepSeek
+tokens / how much cost per request? which tool is the latency hotspot? are we
+about to hit the `500/day` cap?*
+
+Instrumentation is **opt-in and a no-op when unconfigured** — local dev, CI, and
+the test suite run unchanged without any Grafana credentials. Export turns on
+only when `OTEL_ENABLED=true` **and** an OTLP endpoint is set. The manual
+instrumentation always goes through the OpenTelemetry *API*, which resolves to
+cheap no-ops until the SDK exporter is installed at startup.
+
+**What you get when enabled**
+
+- **Traces** — a server span per request (FastAPI auto-instrumentation), a manual
+  `agent.run` span, and one child `tool.<name>` span per LangChain tool call. A
+  chat request becomes one end-to-end trace: request → agent → per-tool spans →
+  DeepSeek LLM call.
+- **Metrics** — RED HTTP metrics per route plus domain metrics: agent latency,
+  per-tool call counts + latency, DeepSeek token usage & **estimated cost**,
+  streaming **time-to-first-token**, and rate-limit 429s. Labels are
+  low-cardinality (no session ids or IPs).
+- **Dashboard** — a reproducible Grafana dashboard at
+  [`observability/dashboard.json`](observability/dashboard.json) (import via
+  *Dashboards → New → Import*).
+
+**Setup.** Set `OTEL_ENABLED=true`, `OTEL_EXPORTER_OTLP_ENDPOINT` (the Grafana
+Cloud OTLP gateway URL) and `OTEL_EXPORTER_OTLP_HEADERS`
+(`Authorization=Basic <base64(instanceID:token)>`) — see `backend/.env.example`
+and the full runbook in [`observability/README.md`](observability/README.md),
+including **how to find a slow request via its trace**. No secrets or request
+bodies are ever placed in spans, metric labels, or logs.
+
+> **Security:** `OTEL_EXPORTER_OTLP_HEADERS` carries the Grafana auth token — it
+> is backend-only, like `DEEPSEEK_API_KEY`. Never log it or expose it to the
+> browser.
 
 ---
 
@@ -581,3 +627,10 @@ checklist). In brief:
 
 Health check paths (`/api/health` for the backend) are set in `render.yaml` and gate
 deploys.
+
+**Optional — observability.** To export traces/metrics from the deployed backend, set
+`OTEL_ENABLED=true` plus `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`
+on the backend service (placeholders are already in `render.yaml` as `sync: false`).
+Leave them unset and instrumentation stays a no-op. The OTLP header carries the Grafana
+auth token, so treat it like `DEEPSEEK_API_KEY` — backend-only, never logged. See
+[`observability/README.md`](observability/README.md).
