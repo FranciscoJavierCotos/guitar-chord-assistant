@@ -274,6 +274,13 @@ through the real agent and scores each response.
 (single chords, progressions by key/genre/mood, theory questions, and follow-ups
 that use session context/history). Each case carries the prompt, optional
 `context`/`history`, objective `expect` constraints, and a judge `rubric`.
+Fingering cases pin a `skill_level` in `context` so the agent answers the
+question directly rather than first asking the user's level.
+
+**Reproducibility** — the gate must give the same verdict on the same code, so
+the eval runs the agent at a **pinned temperature** (0 by default, override with
+`EVAL_AGENT_TEMPERATURE`) instead of the chat app's 0.7. A score change then
+means a code/prompt change, not sampling luck.
 
 **Run it:**
 
@@ -520,6 +527,27 @@ per-tool `status` frame on each `on_tool_start` (mapped via `TOOL_STATUS_LABELS`
 frames for the answer deltas. `Chat.tsx` parses the stream line-by-line and shows the live status
 under the typing indicator until the first token arrives. The trailing action JSON still
 reassembles from `token` frames, so the chord-panel contract is unchanged.
+
+### 9. Eval gate flapped between runs on unchanged code
+
+**Symptom.** `python -m eval` reported a different deterministic pass rate on each run of the
+same commit — e.g. 67%, then 75%, then 100% — with a different single-chord case failing each
+time (`no valid action block found`). A regression gate that returns a different verdict on
+identical code can't gate anything.
+
+**Root cause.** Two compounding issues. (1) The runner invoked the agent at the chat app's
+`temperature=0.7`, so each run sampled a different answer; sometimes the agent emitted the
+`show_chord` block, sometimes it ended on a follow-up question instead. (2) For a bare
+"how do I play X" with no skill level set, the system prompt's "ask the user's level once when
+unknown" rule made the agent reply with a clarifying question rather than the chord block — a
+legitimate conversational move, but not what the fingering cases are scoring.
+
+**Fix.** The eval now runs the agent at a **pinned temperature** (0 by default, override with
+`EVAL_AGENT_TEMPERATURE`); `run_agent` / `build_agent_executor` gained an optional `temperature`
+arg while production keeps `DEFAULT_AGENT_TEMPERATURE` (0.7). The fingering cases pin a
+`skill_level` in their `context` so the agent answers directly. `run_agent` also now falls back
+on an *empty* output (not just a missing key), since the tool-calling agent occasionally returns
+a blank final message after a tool turn. The gate is now reproducible at 100% on the golden set.
 
 ---
 

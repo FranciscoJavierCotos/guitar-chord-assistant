@@ -1,9 +1,17 @@
 # Single-chord lookups — the agent should emit a `show_chord` block for the
 # requested chord and finger it correctly. Chords must exist in data/chords.py.
+#
+# Each case pins `skill_level` context so the agent answers the fingering question
+# directly. Without it the system prompt's "ask the user's skill level once when
+# unknown" rule makes the agent reply with a clarifying question instead of the
+# show_chord block — a real conversational behaviour, but not what these cases
+# are testing (chord display correctness), and it made the gate flap.
 
 - id: chord-f-fingering
   prompt: "How do I play the F chord on guitar?"
   tags: [single-chord, fingering]
+  context:
+    skill_level: beginner
   expect:
     action: show_chord
     chord_ids: ["F"]
@@ -17,6 +25,8 @@
 - id: chord-am-fingering
   prompt: "Show me how to finger an A minor chord."
   tags: [single-chord, fingering]
+  context:
+    skill_level: beginner
   expect:
     action: show_chord
     chord_ids: ["Am"]
@@ -28,6 +38,8 @@
 - id: chord-cmaj7-info
   prompt: "What is a Cmaj7 chord and how do I play it?"
   tags: [single-chord, theory]
+  context:
+    skill_level: intermediate
   expect:
     action: show_chord
     chord_ids: ["Cmaj7"]
@@ -40,6 +52,8 @@
 - id: chord-bm-fingering
   prompt: "How do I play Bm? I keep getting buzzing strings."
   tags: [single-chord, fingering]
+  context:
+    skill_level: intermediate
   expect:
     action: show_chord
     chord_ids: ["Bm"]

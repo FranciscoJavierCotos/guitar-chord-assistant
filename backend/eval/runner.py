@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import uuid
 from dataclasses import asdict
@@ -29,6 +30,11 @@ from eval.graders.judge import JudgeConfig, judge_response
 
 DEFAULT_THRESHOLD = 0.85
 DEFAULT_JUDGE_THRESHOLD = 0.80
+# The agent's production temperature (0.7) makes the golden set non-reproducible:
+# the same code scores 67%/75%/100% across runs purely from sampling noise, so the
+# gate can't tell a regression from luck. Pin it to 0 for eval runs (override with
+# EVAL_AGENT_TEMPERATURE) so a score change reflects a code/prompt change.
+DEFAULT_AGENT_TEMPERATURE = 0.0
 REPORTS_DIR = Path(__file__).parent / "reports"
 # backend/.env — the agent (and, by default, the judge) read DEEPSEEK_API_KEY from
 # the environment; load it from the backend .env so a local run doesn't need the
@@ -60,6 +66,18 @@ def _seed_history(case: EvalCase) -> InMemoryChatMessageHistory:
     return history
 
 
+def _agent_temperature() -> float:
+    """Sampling temperature for eval runs — 0 for reproducibility, overridable
+    via EVAL_AGENT_TEMPERATURE."""
+    raw = os.getenv("EVAL_AGENT_TEMPERATURE")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_AGENT_TEMPERATURE
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_AGENT_TEMPERATURE
+
+
 async def _generate(case: EvalCase) -> str:
     # Imported lazily so deterministic-only / offline tooling doesn't require the
     # agent stack or a configured API key at import time.
@@ -71,6 +89,7 @@ async def _generate(case: EvalCase) -> str:
         history=history,
         context=case.context,
         session_id=f"eval-{case.id}-{uuid.uuid4().hex[:8]}",
+        temperature=_agent_temperature(),
     )
 
 

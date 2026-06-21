@@ -21,6 +21,13 @@ from agent.tools import TOOLS, _current_session_id
 # the wording. Keep run_agent's fallback message anchored on this constant.
 AGENT_ERROR_PREFIX = "I ran into a technical issue:"
 
+# Sampling temperature for the live chat agent. Kept at 0.7 for varied, lively
+# replies in production. Callers that need reproducible output — notably the
+# offline eval runner, where a flaky temperature turns the regression gate into
+# noise — pass an explicit ``temperature`` (e.g. 0) to build_agent_executor /
+# run_agent to override it.
+DEFAULT_AGENT_TEMPERATURE = 0.7
+
 SYSTEM_PROMPT = """You are ChordCoach, an expert guitar teacher and music theorist. You help guitarists learn chord progressions, understand music theory, and discover new songs to play.
 
 Your personality: encouraging, knowledgeable, enthusiastic about music, patient with beginners.
@@ -136,7 +143,7 @@ TOOL_STATUS_LABELS = {
 DEFAULT_TOOL_LABEL = "Working on it…"
 
 
-def build_agent_executor() -> AgentExecutor:
+def build_agent_executor(temperature: float | None = None) -> AgentExecutor:
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         # Belt-and-suspenders: the /api/chat route already 503s when the key is
@@ -148,7 +155,7 @@ def build_agent_executor() -> AgentExecutor:
         model="deepseek-chat",
         api_key=api_key,
         base_url="https://api.deepseek.com/v1",
-        temperature=0.7,
+        temperature=DEFAULT_AGENT_TEMPERATURE if temperature is None else temperature,
         max_tokens=2048,
         # Required for token-by-token streaming. Without this, langchain calls
         # DeepSeek in non-streaming mode, so AgentExecutor.astream_events surfaces
@@ -204,17 +211,21 @@ async def run_agent(
     history: InMemoryChatMessageHistory,
     context: dict | None = None,
     session_id: str = "",
+    temperature: float | None = None,
 ) -> str:
     message = _apply_context_prefix(message, context)
 
-    executor = build_agent_executor()
+    executor = build_agent_executor(temperature=temperature)
     token = _current_session_id.set(session_id)
     try:
         result = await executor.ainvoke({
             "input": message,
             "chat_history": _windowed(history),
         })
-        output = result.get("output", "I couldn't generate a response. Please try again.")
+        # `or` (not get's default) so an empty-string output — which the
+        # tool-calling agent occasionally returns after a tool turn — also falls
+        # back instead of surfacing as a blank answer.
+        output = result.get("output") or "I couldn't generate a response. Please try again."
         # Persist the turn so subsequent requests in this session have context.
         history.add_messages([HumanMessage(content=message), AIMessage(content=output)])
         return output
