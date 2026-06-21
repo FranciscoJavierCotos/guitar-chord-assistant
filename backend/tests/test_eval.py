@@ -156,6 +156,74 @@ class TestProgressionResolves:
 # ─── golden-set integrity ───────────────────────────────────────────────────────
 
 
+class TestInfraErrorHandling:
+    """An agent infrastructure failure (bad key, network, provider outage) must be
+    reported as an *errored* case, not a 0% content-grading failure. Regression for
+    the 401 misdiagnosis where every case showed 'no valid action block found'."""
+
+    def test_detects_agent_error_string(self):
+        from eval.runner import _agent_error
+        from agent.coach_agent import AGENT_ERROR_PREFIX
+
+        fallback = (
+            f"{AGENT_ERROR_PREFIX} Error code: 401 - Authentication Fails\n\n"
+            "Please try rephrasing your question or ask me something else!"
+        )
+        assert _agent_error(fallback) is not None
+        # A real answer (even a bad one) is not an infra error.
+        assert _agent_error(SHOW_CHORDS) is None
+        assert _agent_error("Here are some chords, no action block.") is None
+
+    def test_aggregate_excludes_errored_from_content_metrics(self):
+        from eval.runner import _aggregate
+        from eval.graders.judge import JudgeConfig
+
+        errored = {
+            "id": "boom", "tags": [], "prompt": "p", "response": "x",
+            "errored": True, "error": "401",
+            "deterministic": [{"name": "action_valid", "passed": False, "detail": "no block"}],
+            "deterministic_passed": False,
+        }
+        ok = {
+            "id": "fine", "tags": [], "prompt": "p", "response": SHOW_CHORDS,
+            "errored": False, "error": None,
+            "deterministic": [{"name": "action_valid", "passed": True, "detail": "ok"}],
+            "deterministic_passed": True,
+        }
+        s = _aggregate([errored, ok], use_judge=False, judge_config=JudgeConfig())["summary"]
+        assert s["errored_cases"] == 1
+        assert s["scored_cases"] == 1
+        # The errored case must not drag the pass rate down — the one scored case passed.
+        assert s["deterministic_pass_rate"] == 1.0
+        assert s["per_grader_pass_rate"]["action_valid"] == 1.0
+
+    def test_main_aborts_with_exit_2_when_a_case_errors(self, tmp_path, monkeypatch):
+        from eval import runner
+
+        errored_report = {
+            "summary": {
+                "total_cases": 1, "errored_cases": 1, "scored_cases": 0,
+                "deterministic_pass_rate": 1.0, "deterministic_cases_passed": 0,
+                "per_grader_pass_rate": {}, "use_judge": False,
+            },
+            "cases": [{
+                "id": "boom", "tags": [], "prompt": "p", "response": "x",
+                "errored": True, "error": "401",
+                "deterministic": [], "deterministic_passed": False,
+            }],
+        }
+        monkeypatch.setattr(runner, "load_cases", lambda *a, **k: [EvalCase(id="boom", prompt="p")])
+        monkeypatch.setattr(runner, "_load_env", lambda: None)
+
+        async def _fake_eval(*a, **k):
+            return errored_report
+
+        monkeypatch.setattr(runner, "run_eval", _fake_eval)
+        out = tmp_path / "report.json"
+        # Distinct exit code 2 (infra), never the content-threshold exit 1.
+        assert runner.main(["--no-judge", "--out", str(out)]) == 2
+
+
 class TestGoldenSet:
     def test_loads_enough_cases(self):
         cases = load_cases()
