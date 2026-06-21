@@ -98,6 +98,73 @@ def test_persists_full_answer_to_history(monkeypatch):
     assert history.messages[1].content == "Em C G"
 
 
+def _apply_frames(frames):
+    """Reassemble the text a client would display after honouring reset frames."""
+    text = ""
+    for f in frames:
+        if f["type"] == "reset":
+            text = ""
+        elif f["type"] == "token":
+            text += f["text"]
+    return text
+
+
+def test_discards_intermediate_planning_content(monkeypatch):
+    # Regression for the second-turn "Let me look up the actual chords…" wall of
+    # repeated lines (#13). A tool-calling agent runs several model calls, and
+    # DeepSeek emits a conversational preamble *in the same run as the tool call*.
+    # Only the final answer run must survive — both on the wire and in history.
+    events = [
+        # Planning run A: preamble streamed alongside a tool call.
+        {"event": "on_chat_model_stream", "run_id": "run-A",
+         "data": {"chunk": _FakeChunk("Let me look up the actual chords ")}},
+        {"event": "on_chat_model_stream", "run_id": "run-A",
+         "data": {"chunk": _FakeChunk("for this song!")}},
+        {"event": "on_tool_start", "name": "find_song_chords", "data": {}},
+        # Planning run B: another preamble before a second tool call.
+        {"event": "on_chat_model_stream", "run_id": "run-B",
+         "data": {"chunk": _FakeChunk("Let me search for the real chords.")}},
+        {"event": "on_tool_start", "name": "find_song_chords", "data": {}},
+        # Final answer run C: the only content the user should keep.
+        {"event": "on_chat_model_stream", "run_id": "run-C",
+         "data": {"chunk": _FakeChunk("Here are ")}},
+        {"event": "on_chat_model_stream", "run_id": "run-C",
+         "data": {"chunk": _FakeChunk("the real chords.")}},
+    ]
+    history = InMemoryChatMessageHistory()
+
+    frames = _drain("play wonderwall", history, events, monkeypatch)
+
+    # A reset frame precedes each new content run so the client drops the preamble.
+    assert sum(1 for f in frames if f["type"] == "reset") == 2
+
+    # What the client ultimately renders is only the final-answer run.
+    assert _apply_frames(frames) == "Here are the real chords."
+    assert "Let me look up" not in _apply_frames(frames)
+
+    # And only the final answer is persisted — so the next turn isn't poisoned.
+    assert len(history.messages) == 2
+    assert history.messages[1].content == "Here are the real chords."
+
+
+def test_no_reset_when_only_final_run_emits_content(monkeypatch):
+    # The common case (planning runs emit tool calls with no content) must not
+    # emit a spurious reset — the first content run is the answer.
+    events = [
+        {"event": "on_chat_model_stream", "run_id": "run-A", "data": {"chunk": _FakeChunk("")}},
+        {"event": "on_tool_start", "name": "find_song_chords", "data": {}},
+        {"event": "on_chat_model_stream", "run_id": "run-B", "data": {"chunk": _FakeChunk("All ")}},
+        {"event": "on_chat_model_stream", "run_id": "run-B", "data": {"chunk": _FakeChunk("good.")}},
+    ]
+    history = InMemoryChatMessageHistory()
+
+    frames = _drain("hi", history, events, monkeypatch)
+
+    assert not any(f["type"] == "reset" for f in frames)
+    assert _apply_frames(frames) == "All good."
+    assert history.messages[1].content == "All good."
+
+
 def test_unknown_tool_uses_default_label(monkeypatch):
     events = [
         {"event": "on_tool_start", "name": "some_future_tool", "data": {}},

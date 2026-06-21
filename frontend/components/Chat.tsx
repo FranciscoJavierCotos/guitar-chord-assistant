@@ -189,6 +189,16 @@ export default function Chat({ onProgressionUpdate }: Props) {
               prev.map((m) => (m.id === assistantId ? { ...m, status: frame.label } : m)),
             );
           }
+        } else if (frame.type === "reset") {
+          // The text streamed so far was an intermediate planning preamble, not the
+          // answer. Clear it and fall back to the typing indicator until the real
+          // answer streams in. (See run_agent_stream's run_id tracking.)
+          responseText = "";
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: "", status: "Thinking…" } : m,
+            ),
+          );
         } else if (frame.type === "token" && frame.text) {
           responseText += frame.text;
           setMessages((prev) =>
