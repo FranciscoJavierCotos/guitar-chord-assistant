@@ -1,0 +1,184 @@
+"""
+Offline tests for the eval harness — the AgentAction schema mirror, the
+deterministic graders, and golden-set integrity.
+
+These run with no network and no LLM (they grade fixture responses), so the
+*deterministic* portion of the eval is exercised on every PR via the normal
+backend pytest job. The full agent+judge run lives in `python -m eval` and is
+gated to workflow_dispatch / main in CI.
+"""
+
+import pytest
+
+from eval.cases import EvalCase, Expect, load_cases
+from eval.schema import parse_agent_action, extract_action_block
+from eval.graders.deterministic import (
+    run_deterministic,
+    grade_action_valid,
+    grade_chords_in_db,
+    grade_key_adherence,
+    grade_chord_ids,
+    grade_chord_count,
+    grade_progression_resolves,
+    _diatonic_roots,
+)
+
+
+def _block(action_json: str) -> str:
+    return f"Here you go.\n```json\n{action_json}\n```"
+
+
+SHOW_CHORDS = _block('{"action": "show_chords", "chords": ["E7", "A7", "B7"], '
+                     '"progression_name": "12-Bar Blues in E", "bpm_suggestion": 75}')
+SHOW_CHORD = _block('{"action": "show_chord", "chord": "Am"}')
+
+
+# ─── schema ───────────────────────────────────────────────────────────────────
+
+
+class TestSchema:
+    def test_parses_show_chords(self):
+        action = parse_agent_action(SHOW_CHORDS)
+        assert action is not None
+        assert action.action == "show_chords"
+        assert action.chords == ["E7", "A7", "B7"]
+        assert action.referenced_chords() == ["E7", "A7", "B7"]
+
+    def test_parses_show_chord(self):
+        action = parse_agent_action(SHOW_CHORD)
+        assert action is not None
+        assert action.chord == "Am"
+        assert action.referenced_chords() == ["Am"]
+
+    def test_no_block_returns_none(self):
+        assert parse_agent_action("Just some prose, no block.") is None
+        assert extract_action_block("no fence here") is None
+
+    def test_invalid_json_returns_none(self):
+        assert parse_agent_action('```json\n{"action": "show_chords", oops}\n```') is None
+
+    def test_unknown_action_returns_none(self):
+        assert parse_agent_action(_block('{"action": "explode"}')) is None
+
+    def test_non_string_chords_rejected(self):
+        assert parse_agent_action(_block('{"action": "show_chords", "chords": [1, 2]}')) is None
+
+
+# ─── deterministic graders ──────────────────────────────────────────────────────
+
+
+class TestActionValid:
+    def test_pass_on_matching_action(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(action="show_chords"))
+        assert grade_action_valid(case, SHOW_CHORDS).passed
+
+    def test_fail_on_missing_block(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(action="show_chords"))
+        assert grade_action_valid(case, "no block").passed is False
+
+    def test_fail_on_wrong_action_type(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(action="show_chord"))
+        assert grade_action_valid(case, SHOW_CHORDS).passed is False
+
+    def test_expect_none_passes_when_absent(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(action="none"))
+        assert grade_action_valid(case, "pure prose").passed
+
+    def test_expect_none_fails_when_present(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(action="none"))
+        assert grade_action_valid(case, SHOW_CHORDS).passed is False
+
+    def test_not_applicable_when_unset(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect())
+        assert grade_action_valid(case, SHOW_CHORDS) is None
+
+
+class TestChordsInDb:
+    def test_pass_on_real_chords(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect())
+        assert grade_chords_in_db(case, SHOW_CHORDS).passed
+
+    def test_fail_on_hallucinated_chord(self):
+        bad = _block('{"action": "show_chords", "chords": ["E7", "Zz9"]}')
+        case = EvalCase(id="c", prompt="p", expect=Expect())
+        result = grade_chords_in_db(case, bad)
+        assert result.passed is False and "Zz9" in result.detail
+
+
+class TestKeyAdherence:
+    def test_pass_when_diatonic(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(key="E"))
+        assert grade_key_adherence(case, SHOW_CHORDS).passed
+
+    def test_fail_when_out_of_key(self):
+        off = _block('{"action": "show_chords", "chords": ["E7", "Fm"]}')
+        case = EvalCase(id="c", prompt="p", expect=Expect(key="E"))
+        assert grade_key_adherence(case, off).passed is False
+
+    def test_minor_key_roots(self):
+        # Am minor diatonic roots include A, C, D, E, F, G.
+        roots = _diatonic_roots("Am")
+        from agent.tools import _note_index
+        for note in ("A", "C", "D", "E", "F", "G"):
+            assert _note_index(note) in roots
+
+
+class TestChordConstraints:
+    def test_chord_ids_present(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(chord_ids=["E7", "A7"]))
+        assert grade_chord_ids(case, SHOW_CHORDS).passed
+
+    def test_chord_ids_missing(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(chord_ids=["Cmaj7"]))
+        assert grade_chord_ids(case, SHOW_CHORDS).passed is False
+
+    def test_min_chords(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(min_chords=5))
+        assert grade_chord_count(case, SHOW_CHORDS).passed is False
+
+    def test_max_chords(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(max_chords=10))
+        assert grade_chord_count(case, SHOW_CHORDS).passed
+
+
+class TestProgressionResolves:
+    def test_resolves_by_name(self):
+        case = EvalCase(id="c", prompt="p", expect=Expect(progression_resolves=True))
+        assert grade_progression_resolves(case, SHOW_CHORDS).passed
+
+    def test_unresolvable_name(self):
+        block = _block('{"action": "show_chords", "chords": ["X", "Y"], '
+                       '"progression_name": "Totally Made Up Progression"}')
+        case = EvalCase(id="c", prompt="p", expect=Expect(progression_resolves=True))
+        assert grade_progression_resolves(case, block).passed is False
+
+
+# ─── golden-set integrity ───────────────────────────────────────────────────────
+
+
+class TestGoldenSet:
+    def test_loads_enough_cases(self):
+        cases = load_cases()
+        assert len(cases) >= 15, "golden set should have at least ~15 cases"
+
+    def test_ids_unique(self):
+        cases = load_cases()
+        ids = [c.id for c in cases]
+        assert len(ids) == len(set(ids))
+
+    @pytest.mark.parametrize("case", load_cases(), ids=[c.id for c in load_cases()])
+    def test_case_is_well_formed(self, case):
+        assert case.id and case.prompt
+        if case.expect.action is not None:
+            assert case.expect.action in {"show_chords", "show_chord", "none"}
+        for turn in case.history:
+            assert turn.get("role") in {"user", "human", "assistant", "ai"}
+        # A judge rubric should exist so the subjective grader has guidance.
+        assert case.judge.dimensions
+
+    @pytest.mark.parametrize("case", load_cases(), ids=[c.id for c in load_cases()])
+    def test_expected_chord_ids_exist_in_db(self, case):
+        # Cases must not assert chords the dataset can't render.
+        from data.chords import get_chord
+        for chord in case.expect.chord_ids:
+            assert get_chord(chord) is not None, f"{case.id}: {chord} not in dataset"

@@ -1,2 +1,6 @@
 -r requirements.txt
 pytest>=8.0.0
+# Used directly by the eval harness (eval/cases.py) to load golden-set YAML.
+# Already present transitively via langchain, but pinned here so the eval job
+# doesn't depend on a transitive dependency staying installed.
+pyyaml>=6.0
