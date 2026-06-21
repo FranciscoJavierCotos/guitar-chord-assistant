@@ -11,8 +11,11 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage
 
+import time
+
 from agent.memory import HISTORY_WINDOW_TURNS
 from agent.tools import TOOLS, _current_session_id
+from observability import agent_run_span, get_agent_callback, record_ttft
 
 # Prefix of the user-facing fallback returned by run_agent when the agent turn
 # raises (bad/expired API key, network failure, provider 5xx, …). Exported so
@@ -162,6 +165,10 @@ def build_agent_executor(temperature: float | None = None) -> AgentExecutor:
         # the whole final answer as a single chunk at the end (~25s wait) instead
         # of streaming it as it's generated. See run_agent_stream.
         streaming=True,
+        # Surface token usage in the final streamed chunk so the observability
+        # callback can record token counts / estimated cost (no-op when export
+        # is off). Harmless on the non-streaming path.
+        stream_usage=True,
     )
 
     prompt = ChatPromptTemplate.from_messages([
@@ -217,11 +224,13 @@ async def run_agent(
 
     executor = build_agent_executor(temperature=temperature)
     token = _current_session_id.set(session_id)
+    callback = get_agent_callback()
     try:
-        result = await executor.ainvoke({
-            "input": message,
-            "chat_history": _windowed(history),
-        })
+        with agent_run_span(streaming=False):
+            result = await executor.ainvoke(
+                {"input": message, "chat_history": _windowed(history)},
+                config={"callbacks": [callback]},
+            )
         # `or` (not get's default) so an empty-string output — which the
         # tool-calling agent occasionally returns after a tool turn — also falls
         # back instead of surfacing as a blank answer.
@@ -268,37 +277,45 @@ async def run_agent_stream(
 
     executor = build_agent_executor()
     token = _current_session_id.set(session_id)
+    callback = get_agent_callback()
     collected: list[str] = []
+    start = time.perf_counter()
+    first_token_seen = False
     try:
-        # Immediate feedback so the bubble isn't blank during the first planning call.
-        yield _frame({"type": "status", "label": "Thinking…"})
+        with agent_run_span(streaming=True):
+            # Immediate feedback so the bubble isn't blank during the first planning call.
+            yield _frame({"type": "status", "label": "Thinking…"})
 
-        async for event in executor.astream_events(
-            {"input": message, "chat_history": _windowed(history)},
-            version="v2",
-        ):
-            kind = event["event"]
-            if kind == "on_tool_start":
-                label = TOOL_STATUS_LABELS.get(event.get("name", ""), DEFAULT_TOOL_LABEL)
-                yield _frame({"type": "status", "label": label})
-                continue
-            if kind != "on_chat_model_stream":
-                continue
-            chunk = event["data"]["chunk"]
-            text = chunk.content
-            # OpenAI-compatible models stream content as a plain string; guard
-            # against providers that emit a list of content parts.
-            if isinstance(text, list):
-                text = "".join(
-                    part.get("text", "") if isinstance(part, dict) else str(part)
-                    for part in text
-                )
-            if text:
-                collected.append(text)
-                yield _frame({"type": "token", "text": text})
+            async for event in executor.astream_events(
+                {"input": message, "chat_history": _windowed(history)},
+                version="v2",
+                config={"callbacks": [callback]},
+            ):
+                kind = event["event"]
+                if kind == "on_tool_start":
+                    label = TOOL_STATUS_LABELS.get(event.get("name", ""), DEFAULT_TOOL_LABEL)
+                    yield _frame({"type": "status", "label": label})
+                    continue
+                if kind != "on_chat_model_stream":
+                    continue
+                chunk = event["data"]["chunk"]
+                text = chunk.content
+                # OpenAI-compatible models stream content as a plain string; guard
+                # against providers that emit a list of content parts.
+                if isinstance(text, list):
+                    text = "".join(
+                        part.get("text", "") if isinstance(part, dict) else str(part)
+                        for part in text
+                    )
+                if text:
+                    if not first_token_seen:
+                        record_ttft(time.perf_counter() - start)
+                        first_token_seen = True
+                    collected.append(text)
+                    yield _frame({"type": "token", "text": text})
 
-        full = "".join(collected)
-        if full:
-            history.add_messages([HumanMessage(content=message), AIMessage(content=full)])
+            full = "".join(collected)
+            if full:
+                history.add_messages([HumanMessage(content=message), AIMessage(content=full)])
     finally:
         _current_session_id.reset(token)

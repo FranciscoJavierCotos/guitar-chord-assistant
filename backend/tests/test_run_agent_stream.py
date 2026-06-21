@@ -28,7 +28,9 @@ class _FakeExecutor:
     def __init__(self, events):
         self._events = events
 
-    async def astream_events(self, _inputs, version="v2"):
+    async def astream_events(self, _inputs, version="v2", **_kwargs):
+        # **_kwargs swallows the observability `config={"callbacks": [...]}` that
+        # run_agent_stream now passes through to the real executor.
         for event in self._events:
             yield event
 
