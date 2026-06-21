@@ -280,7 +280,8 @@ that use session context/history). Each case carries the prompt, optional
 ```bash
 cd chord-coach/backend
 pip install -r requirements-dev.txt
-export DEEPSEEK_API_KEY=...           # the agent (and, by default, the judge) need it
+# DEEPSEEK_API_KEY (the agent + judge) is auto-loaded from backend/.env if present;
+# a real env var / CI secret always takes precedence. Export it only if no .env.
 
 python -m eval                        # full run: agent + deterministic + judge
 python -m eval --no-judge             # deterministic graders only (still calls the agent)

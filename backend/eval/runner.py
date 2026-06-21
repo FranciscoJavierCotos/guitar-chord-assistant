@@ -30,6 +30,22 @@ from eval.graders.judge import JudgeConfig, judge_response
 DEFAULT_THRESHOLD = 0.85
 DEFAULT_JUDGE_THRESHOLD = 0.80
 REPORTS_DIR = Path(__file__).parent / "reports"
+# backend/.env — the agent (and, by default, the judge) read DEEPSEEK_API_KEY from
+# the environment; load it from the backend .env so a local run doesn't need the
+# key exported by hand. Real env vars (e.g. the CI secret) always take precedence.
+ENV_PATH = Path(__file__).parent.parent / ".env"
+
+
+def _load_env() -> None:
+    """Best-effort load of backend/.env without overriding real env vars.
+
+    No-op if python-dotenv isn't installed or the file is absent — in CI the key
+    comes from the job's env, not a committed file."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(dotenv_path=ENV_PATH, override=False)
 
 
 def _seed_history(case: EvalCase) -> InMemoryChatMessageHistory:
@@ -178,6 +194,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--concurrency", type=int, default=4, help="cases run in parallel")
     parser.add_argument("--out", default=None, help="report JSON path (default eval/reports/report.json)")
     args = parser.parse_args(argv)
+
+    _load_env()
 
     cases = load_cases(args.cases_dir) if args.cases_dir else load_cases()
     if args.limit:
