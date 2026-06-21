@@ -224,6 +224,43 @@ class TestInfraErrorHandling:
         assert runner.main(["--no-judge", "--out", str(out)]) == 2
 
 
+class TestDeterminism:
+    """The golden set is a regression gate, so the agent must run at a pinned
+    temperature — otherwise the production 0.7 makes the same code score
+    67%/75%/100% across runs from sampling noise alone."""
+
+    def test_default_eval_temperature_is_zero(self):
+        from eval.runner import _agent_temperature
+
+        assert _agent_temperature() == 0.0
+
+    def test_env_overrides_eval_temperature(self, monkeypatch):
+        from eval.runner import _agent_temperature
+
+        monkeypatch.setenv("EVAL_AGENT_TEMPERATURE", "0.4")
+        assert _agent_temperature() == 0.4
+        # Garbage falls back to the deterministic default rather than crashing.
+        monkeypatch.setenv("EVAL_AGENT_TEMPERATURE", "not-a-number")
+        assert _agent_temperature() == 0.0
+
+    def test_generate_passes_pinned_temperature_to_agent(self, monkeypatch):
+        import asyncio
+        import agent.coach_agent as coach_agent
+        from eval.runner import _generate
+
+        captured = {}
+
+        async def _fake_run_agent(**kwargs):
+            captured.update(kwargs)
+            return SHOW_CHORD
+
+        monkeypatch.setattr(coach_agent, "run_agent", _fake_run_agent)
+        monkeypatch.delenv("EVAL_AGENT_TEMPERATURE", raising=False)
+
+        asyncio.run(_generate(EvalCase(id="t", prompt="How do I play Am?")))
+        assert captured["temperature"] == 0.0
+
+
 class TestGoldenSet:
     def test_loads_enough_cases(self):
         cases = load_cases()
