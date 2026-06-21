@@ -264,14 +264,25 @@ async def run_agent_stream(
     Frame types (one JSON object per line):
       {"type":"status","label":...}  progress shown while the agent works
       {"type":"token","text":...}    a final-answer text delta
+      {"type":"reset"}               discard any answer text streamed so far
       {"type":"error","message":...} a failure (emitted by the caller)
 
     Uses AgentExecutor.astream_events: an immediate "Thinking…" status covers the
     initial planning call, on_tool_start emits a per-tool status to fill the
-    otherwise-blank tool window, and on_chat_model_stream surfaces the final
-    answer's content chunks token-by-token (planning steps emit only tool calls,
-    no content, so they're naturally skipped). The full turn is persisted to
-    history once the stream completes, matching run_agent's behaviour.
+    otherwise-blank tool window, and on_chat_model_stream surfaces content
+    token-by-token.
+
+    Only the FINAL answer's content is kept. With a tool-calling agent every
+    planning iteration is a separate model run that, with DeepSeek, emits a
+    conversational preamble (e.g. "Let me look up the chords…") *alongside* its
+    tool call — so content is NOT exclusive to the final run. Streaming every
+    run's content concatenated those preambles into the reply and, worse,
+    persisted them to history, so the next turn replayed and amplified the
+    garbage. We therefore track the model run via each event's ``run_id``: when a
+    new run starts producing content we drop whatever the previous run streamed
+    (a planning preamble) and emit a ``reset`` frame so the client clears it. The
+    last run to stream content is the real answer; it has no successor to reset
+    it, so it survives in both the stream and the persisted turn.
     """
     message = _apply_context_prefix(message, context)
 
@@ -279,6 +290,10 @@ async def run_agent_stream(
     token = _current_session_id.set(session_id)
     callback = get_agent_callback()
     collected: list[str] = []
+    # Sentinel distinct from a real run_id and from ``None`` (which some stubbed
+    # events use), so the first content token always registers a fresh run.
+    _UNSET = object()
+    content_run_id: object = _UNSET
     start = time.perf_counter()
     first_token_seen = False
     try:
@@ -307,12 +322,22 @@ async def run_agent_stream(
                         part.get("text", "") if isinstance(part, dict) else str(part)
                         for part in text
                     )
-                if text:
-                    if not first_token_seen:
-                        record_ttft(time.perf_counter() - start)
-                        first_token_seen = True
-                    collected.append(text)
-                    yield _frame({"type": "token", "text": text})
+                if not text:
+                    continue
+                run_id = event.get("run_id")
+                if run_id != content_run_id:
+                    # A new model run is emitting content. Anything the previous
+                    # run streamed was an intermediate planning preamble — drop it
+                    # and tell the client to clear what it has shown so far.
+                    if collected:
+                        collected.clear()
+                        yield _frame({"type": "reset"})
+                    content_run_id = run_id
+                if not first_token_seen:
+                    record_ttft(time.perf_counter() - start)
+                    first_token_seen = True
+                collected.append(text)
+                yield _frame({"type": "token", "text": text})
 
             full = "".join(collected)
             if full:

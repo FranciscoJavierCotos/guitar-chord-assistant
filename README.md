@@ -90,7 +90,8 @@ object per line — rather than raw text:
 
 ```
 {"type":"status","label":"Searching the web…"}   ← progress shown while the agent works
-{"type":"token","text":"Let me"}                  ← one answer-text delta
+{"type":"token","text":"Here are"}                ← one answer-text delta
+{"type":"reset"}                                  ← discard answer text streamed so far
 {"type":"error","message":"…"}                    ← emitted on failure
 ```
 
@@ -99,7 +100,11 @@ emits a friendly per-tool `status` (e.g. `"Searching the web for the real chords
 chat bubble shows live activity within ~1–2s instead of sitting blank during the agent's
 planning/tool window. `Chat.tsx` parses the stream line-by-line: it renders the `status` label
 under a typing indicator until the first `token` arrives, then appends `token` deltas into the
-live message. The trailing action block streams as `token` frames and is reassembled, so
+live message. **Only the final answer is streamed:** a tool-calling agent runs several model
+calls, and DeepSeek emits a conversational preamble ("Let me look up the chords…") alongside
+each tool call. `run_agent_stream` tracks the model run by `run_id`; when a later run starts
+producing content it emits a `reset` frame, and `Chat.tsx` clears the flashed preamble and
+restores the typing indicator until the real answer streams in. The trailing action block streams as `token` frames and is reassembled, so
 `Chat.tsx` still parses it with the same regex once the stream finishes (the full JSON has
 arrived). `MessageBubble` strips both completed and still-unterminated trailing ` ```json `
 fences, so the raw JSON never flashes on screen mid-stream.
@@ -385,7 +390,7 @@ bodies are ever placed in spans, metric labels, or logs.
 |---|---|---|---|
 | `/api/health` | GET | open | Health check (Render health probe) |
 | `/api/chat` | POST | token | Send message to the AI agent; returns the full reply as JSON `{response, session_id}` (rate-limited) |
-| `/api/chat/stream` | POST | NDJSON | Same body as `/api/chat`; streams the reply as chunked `text/plain` **NDJSON event frames** (`status` / `token` / `error`, one JSON object per line) so progress and answer text render as they're generated. Used by the frontend. Same rate limits. |
+| `/api/chat/stream` | POST | NDJSON | Same body as `/api/chat`; streams the reply as chunked `text/plain` **NDJSON event frames** (`status` / `token` / `reset` / `error`, one JSON object per line) so progress and answer text render as they're generated. Used by the frontend. Same rate limits. |
 | `/api/chord/{name}` | GET | token | Chord fingering data (e.g. `Am`, `G7`, `Bm`) |
 | `/api/chords` | GET | token | All chords in the database |
 | `/api/progressions` | GET | token | All progressions; filter with `?genre=blues` or `?key=E` |

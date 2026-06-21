@@ -11,6 +11,7 @@
 export type StreamFrame =
   | { type: "status"; label?: string }
   | { type: "token"; text?: string }
+  | { type: "reset" }
   | { type: "error"; message?: string };
 
 export interface NdjsonParser {

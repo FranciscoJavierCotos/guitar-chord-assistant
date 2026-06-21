@@ -66,6 +66,21 @@ describe("createNdjsonParser", () => {
     expect(onFrame).toHaveBeenCalledWith({ type: "token", text: "ok" });
   });
 
+  it("parses a reset frame (signals the client to drop streamed preamble)", () => {
+    // Regression for #13: planning-run preambles are discarded via a reset frame.
+    const frames = collect((p) => {
+      p.push('{"type":"token","text":"Let me look up…"}\n');
+      p.push('{"type":"reset"}\n');
+      p.push('{"type":"token","text":"Here are the chords."}\n');
+    });
+
+    expect(frames).toEqual([
+      { type: "token", text: "Let me look up…" },
+      { type: "reset" },
+      { type: "token", text: "Here are the chords." },
+    ]);
+  });
+
   it("does not re-emit buffered content on a no-op flush", () => {
     const frames = collect((p) => {
       p.push('{"type":"error","message":"boom"}\n');
