@@ -14,6 +14,13 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agent.memory import HISTORY_WINDOW_TURNS
 from agent.tools import TOOLS, _current_session_id
 
+# Prefix of the user-facing fallback returned by run_agent when the agent turn
+# raises (bad/expired API key, network failure, provider 5xx, …). Exported so
+# callers that need to tell an *infrastructure* failure apart from a real answer
+# — notably the offline eval runner — can detect it without string-duplicating
+# the wording. Keep run_agent's fallback message anchored on this constant.
+AGENT_ERROR_PREFIX = "I ran into a technical issue:"
+
 SYSTEM_PROMPT = """You are ChordCoach, an expert guitar teacher and music theorist. You help guitarists learn chord progressions, understand music theory, and discover new songs to play.
 
 Your personality: encouraging, knowledgeable, enthusiastic about music, patient with beginners.
@@ -213,7 +220,7 @@ async def run_agent(
         return output
     except Exception as exc:
         return (
-            f"I ran into a technical issue: {exc}\n\n"
+            f"{AGENT_ERROR_PREFIX} {exc}\n\n"
             "Please try rephrasing your question or ask me something else!"
         )
     finally:

@@ -293,6 +293,13 @@ and prints a per-grader summary. It **exits non-zero** when the deterministic
 case pass rate drops below `--threshold` (default 0.85) or the judge pass rate
 below `--judge-threshold` (default 0.80), so a regression surfaces loudly.
 
+If the agent can't even answer — a bad/expired `DEEPSEEK_API_KEY`, a network
+failure, a provider outage — those cases are reported as **errored** (not scored
+as content failures, which would falsely read as a 0% quality regression). When
+any case errors the runner **aborts with exit code 2** and a message pointing at
+the credential/connectivity problem, distinct from the content-threshold exit
+code 1. Errored cases are excluded from the content pass-rate denominator.
+
 **Adding a case:** drop a new entry into any `eval/cases/*.yaml`. Set `expect`
 for whatever is objectively checkable (don't over-constrain — e.g. assert the
 requested `key` but not a specific progression when several would be valid), and
