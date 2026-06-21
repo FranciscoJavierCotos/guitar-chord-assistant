@@ -143,9 +143,10 @@ python -m eval --no-judge      # deterministic only (still calls the agent)
 ```
 
 **CI gating** — the deterministic graders run **offline on every PR** (`tests/test_eval.py`, graded
-against fixture responses), while the **full agent + judge eval** runs only on `main` and manual
-dispatch using the `DEEPSEEK_API_KEY` secret, failing under configurable pass-rate thresholds and
-uploading the JSON report as an artifact.
+against fixture responses), while the **full agent + judge eval** runs **only on manual
+`workflow_dispatch`** (it makes real DeepSeek calls, so it is not run automatically) using the
+`DEEPSEEK_API_KEY` secret, failing under configurable pass-rate thresholds and uploading the JSON
+report as an artifact.
 
 ---
 

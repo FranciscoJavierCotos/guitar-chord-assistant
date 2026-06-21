@@ -77,13 +77,14 @@ jobs:
       - run: npm test
 
   # Full offline eval: runs the golden set through the real agent + LLM judge.
-  # Costs real DeepSeek calls, so it is NOT run on every PR — only on pushes to
-  # main and manual workflow_dispatch. The cheap DETERMINISTIC graders DO run on
-  # every PR, via tests/test_eval.py in the `backend` pytest job above (no network),
-  # which is what feeds the `ci` aggregator. This job is intentionally independent
-  # of that aggregator so a missing secret on a fork PR can't block merges.
+  # Costs real DeepSeek calls, so it does NOT run automatically — it is gated to
+  # manual workflow_dispatch only (trigger it from the Actions tab when you want
+  # to check answer quality). The cheap DETERMINISTIC graders DO run on every PR,
+  # via tests/test_eval.py in the `backend` pytest job above (no network), which
+  # is what feeds the `ci` aggregator. This job is intentionally independent of
+  # that aggregator so a missing secret on a fork PR can't block merges.
   eval:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     defaults:
       run:
