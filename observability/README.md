@@ -48,14 +48,30 @@ To get the endpoint + headers: in Grafana Cloud, open **Connections →
 OpenTelemetry (OTLP)**, which shows the gateway URL and generates the Basic-auth
 token. Paste them into the two `OTEL_EXPORTER_OTLP_*` vars.
 
-## Importing the dashboard
+## Importing the dashboards
 
-`dashboard.json` is a reproducible Grafana dashboard (traffic, errors, latency
-percentiles, tokens/cost, tool usage, rate-limit headroom). In Grafana:
-**Dashboards → New → Import → Upload JSON**, then pick your Prometheus/Mimir
-datasource when prompted.
+Two reproducible dashboards live here — import either with **Dashboards → New →
+Import → Upload JSON**, then pick your Prometheus/Mimir datasource when prompted:
 
-The HTTP error-rate panel uses FastAPI auto-instrumentation metric names
+- **`dashboard-kpi.json` — "ChordCoach — KPI Overview"** (uid `chordcoach-kpi`):
+  a single at-a-glance screen for the free tier. Six headline **stat** tiles over
+  the selected time range — agent turns, tokens used, estimated cost, agent
+  latency p95, streaming TTFT p95, and tool error rate (colour-thresholded) —
+  plus four trend charts (request rate, agent latency p50/p95/p99, tokens/s, tool
+  calls/s). Every query is low-cardinality, so it stays well inside the free-tier
+  active-series budget. Start here for day-to-day health.
+- **`dashboard.json` — "ChordCoach — Backend Observability"** (uid
+  `chordcoach-backend`): the deep-dive — RED traffic/errors, full latency
+  percentiles, tokens/cost, per-tool usage & latency, and rate-limit headroom.
+
+The stat tiles in the KPI dashboard reduce over the dashboard's time range
+(`$__range`), so the numbers track whatever window you select in the top-right.
+The tool error-rate tile uses the stable `chordcoach_tool_calls_total{status}`
+counter (not the version-dependent HTTP metric), so it needs no per-version
+tweaking.
+
+The HTTP error-rate panel (deep-dive dashboard) uses FastAPI auto-instrumentation
+metric names
 (`http_server_request_duration_seconds`, label `http_route`); these vary slightly
 across `opentelemetry-instrumentation` versions, so adjust that one panel's query
 if your series are named differently. The custom `chordcoach_*` panels are stable.
