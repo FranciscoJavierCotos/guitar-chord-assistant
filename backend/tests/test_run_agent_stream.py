@@ -176,3 +176,13 @@ def test_unknown_tool_uses_default_label(monkeypatch):
 
     labels = [f["label"] for f in frames if f["type"] == "status"]
     assert coach_agent.DEFAULT_TOOL_LABEL in labels
+
+
+def test_system_prompt_guides_progression_minimum_length():
+    """Regression for #19: the agent occasionally returned a too-thin 2-chord
+    progression. The fix lives in the system prompt — it must steer the agent to
+    recommend at least 3 chords (typically 4). Guard that guidance so it isn't
+    silently dropped in a future prompt edit, which would let the bug regress."""
+    prompt = coach_agent.SYSTEM_PROMPT.lower()
+    assert "at least 3 chords" in prompt
+    assert "two-chord" in prompt
