@@ -288,6 +288,18 @@ class TestGoldenSet:
         for chord in case.expect.chord_ids:
             assert get_chord(chord) is not None, f"{case.id}: {chord} not in dataset"
 
+    def test_scale_chords_case_demands_chords(self):
+        """Regression for #18: "what chords are in the key of G major?" must demand a
+        show_chords block with the diatonic chords, so an empty/no-chord answer fails a
+        deterministic grader (not only the judge). Don't weaken this case."""
+        case = next((c for c in load_cases() if c.id == "theory-scale-chords-g"), None)
+        assert case is not None, "theory-scale-chords-g regression case was removed"
+        assert case.expect.action == "show_chords"
+        assert (case.expect.min_chords or 0) >= 6
+        # The available diatonic chords must be asserted (F#dim has no diagram, excluded).
+        for chord in ("G", "Am", "Bm", "C", "D", "Em"):
+            assert chord in case.expect.chord_ids
+
     def test_mood_only_progression_case_kept(self):
         """Regression for #17: a mood-*only* request ("a sad-sounding progression")
         must stay in the golden set demanding an actual show_chords block, so the
