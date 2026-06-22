@@ -14,8 +14,14 @@
   prompt: "What chords are in the key of G major?"
   tags: [theory, scale]
   expect:
+    # Strengthened (#18): an empty / no-chord answer must fail deterministically, not
+    # only the judge. F#dim has no diagram so it's named in prose but kept out of the
+    # action block; the other six diatonic chords must be shown.
+    action: show_chords
     chords_in_db: true
     key: G
+    chord_ids: [G, Am, Bm, C, D, Em]
+    min_chords: 6
   judge:
     rubric: >
       Must list the diatonic chords of G major (G, Am, Bm, C, D, Em, F#dim) with
