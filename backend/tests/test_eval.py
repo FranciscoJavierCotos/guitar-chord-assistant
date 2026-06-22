@@ -309,3 +309,14 @@ class TestGoldenSet:
         assert case is not None, "prog-sad-mood regression case was removed"
         assert case.expect.action == "show_chords"
         assert (case.expect.min_chords or 0) >= 3
+
+    def test_followup_context_key_demands_min_chords(self):
+        """Regression for #19: "give me a progression I can play right now" with
+        session context (key E, beginner) must stay in the golden set demanding a
+        usable progression of at least 3 chords, so the full eval keeps guarding
+        the case where the agent returned a too-thin 2-chord answer. Don't weaken
+        this case — the prompt's min-length guidance is what keeps it green."""
+        case = next((c for c in load_cases() if c.id == "followup-context-key"), None)
+        assert case is not None, "followup-context-key regression case was removed"
+        assert case.expect.action == "show_chords"
+        assert (case.expect.min_chords or 0) >= 3
