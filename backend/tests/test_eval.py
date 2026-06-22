@@ -287,3 +287,13 @@ class TestGoldenSet:
         from data.chords import get_chord
         for chord in case.expect.chord_ids:
             assert get_chord(chord) is not None, f"{case.id}: {chord} not in dataset"
+
+    def test_mood_only_progression_case_kept(self):
+        """Regression for #17: a mood-*only* request ("a sad-sounding progression")
+        must stay in the golden set demanding an actual show_chords block, so the
+        full eval keeps guarding the prompt-reliability gap where the agent bailed
+        with vague prose and no progression. Don't drop or weaken this case."""
+        case = next((c for c in load_cases() if c.id == "prog-sad-mood"), None)
+        assert case is not None, "prog-sad-mood regression case was removed"
+        assert case.expect.action == "show_chords"
+        assert (case.expect.min_chords or 0) >= 3
