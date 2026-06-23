@@ -131,3 +131,107 @@ class TestDataEndpoints:
         results = res.json()
         assert len(results) > 0
         assert all("blues" in p["genre"] for p in results)
+
+
+# ─── Log injection (CodeQL py/log-injection, issue #36) ─────────────────────────
+# A client controls ChatRequest.session_id, and it (plus the request path) is
+# written to the server log. Two layers guard against forged log lines: the
+# session_id field rejects unsafe input at validation time, and sanitize_for_log
+# neutralizes any user value reaching a log sink. Both are tested here.
+class TestSanitizeForLog:
+    def test_strips_crlf_so_value_cannot_forge_a_second_line(self):
+        forged = "abc\r\nERROR root: injected admin login"
+        cleaned = main.sanitize_for_log(forged)
+        assert "\n" not in cleaned
+        assert "\r" not in cleaned
+
+    def test_strips_other_control_characters(self):
+        cleaned = main.sanitize_for_log("a\tb\x00c\x1bd")
+        assert all(ch.isprintable() for ch in cleaned)
+        # Non-printable chars are replaced, not dropped silently into adjacent text.
+        assert "a" in cleaned and "b" in cleaned and "c" in cleaned and "d" in cleaned
+
+    def test_leaves_a_normal_uuid_untouched(self):
+        uid = "550e8400-e29b-41d4-a716-446655440000"
+        assert main.sanitize_for_log(uid) == uid
+
+    def test_caps_length_with_an_ellipsis(self):
+        cleaned = main.sanitize_for_log("z" * 500, max_len=200)
+        assert cleaned == "z" * 200 + "…"
+
+
+class TestSessionIdValidation:
+    def test_session_id_with_newline_is_rejected_422(self, client, monkeypatch):
+        # The injection vector: a CR/LF-laden session_id must never reach the log
+        # sink — it's rejected before the handler runs. (On the old code this was
+        # accepted and would 503/invoke the agent, not 422.)
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "x")  # ensure 422 isn't masked by 503
+        res = client.post(
+            "/api/chat",
+            headers=auth(),
+            json={"message": "hi", "session_id": "abc\r\nERROR forged"},
+        )
+        assert res.status_code == 422
+
+    def test_session_id_with_illegal_chars_is_rejected_422(self, client, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+        res = client.post(
+            "/api/chat",
+            headers=auth(),
+            json={"message": "hi", "session_id": "drop;<script>"},
+        )
+        assert res.status_code == 422
+
+    def test_overlong_session_id_is_rejected_422(self, client, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+        res = client.post(
+            "/api/chat",
+            headers=auth(),
+            json={"message": "hi", "session_id": "a" * 129},
+        )
+        assert res.status_code == 422
+
+    def test_valid_uuid_session_id_passes_validation(self, client, monkeypatch):
+        # A normal frontend uuidv4 must still be accepted — it gets past validation
+        # and only then hits the missing-key 503 (proving the constraint isn't too tight).
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        res = client.post(
+            "/api/chat",
+            headers=auth(),
+            json={"message": "hi", "session_id": "550e8400-e29b-41d4-a716-446655440000"},
+        )
+        assert res.status_code == 503
+
+
+class TestAgentErrorSinkSanitized:
+    def test_agent_error_is_logged_as_a_single_sanitized_line(self, client, monkeypatch, caplog):
+        # Drive a real failure through the /api/chat error handler and confirm the
+        # log record carries no forged newline. session_id is a valid uuid (the
+        # field guard already blocks newlines); this pins the sink-side sanitize.
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+
+        def boom_run_agent(**kwargs):
+            raise RuntimeError("deepseek exploded")
+
+        def fake_history(_sid):
+            return []
+
+        monkeypatch.setattr(
+            main,
+            "_get_agent_modules",
+            lambda: (boom_run_agent, fake_history, None, None, None, None, None, None),
+        )
+
+        with caplog.at_level("ERROR"):
+            res = client.post(
+                "/api/chat",
+                headers=auth(),
+                json={"message": "hi", "session_id": "550e8400-e29b-41d4-a716-446655440000"},
+            )
+
+        assert res.status_code == 500
+        agent_errors = [r for r in caplog.records if "Agent error for session" in r.getMessage()]
+        assert agent_errors, "expected the agent-error sink to log"
+        msg = agent_errors[0].getMessage()
+        assert "\n" not in msg and "\r" not in msg
+        assert "550e8400-e29b-41d4-a716-446655440000" in msg

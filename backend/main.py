@@ -37,6 +37,22 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("chordcoach")
 
+
+def sanitize_for_log(value: object, max_len: int = 200) -> str:
+    """Neutralize a (possibly user-controlled) value before it goes into a log line.
+
+    Log forging (CWE-117 / CodeQL py/log-injection) works by smuggling CR/LF — or
+    other control characters — into a value that's written verbatim to the log, so
+    one log call emits several attacker-shaped lines. We strip every C0/C1 control
+    char (newlines, tabs, escapes…) and cap the length so a single value can only
+    ever produce a single, bounded log line. Apply this to any request-supplied
+    value (e.g. session_id) before interpolating it into a log record."""
+    text = str(value)
+    cleaned = "".join(ch if ch.isprintable() else " " for ch in text)
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len] + "…"
+    return cleaned
+
 ENV = os.getenv("ENV", "development").lower()
 IS_PROD = ENV == "production"
 
@@ -150,7 +166,15 @@ async def log_requests(request: Request, call_next):
     start = time.time()
     response = await call_next(request)
     duration = round((time.time() - start) * 1000, 1)
-    logger.info(f"{request.method} {request.url.path} → {response.status_code} ({duration}ms)")
+    # request.url.path is URL-decoded and thus user-controlled (a crafted %0A in a
+    # path param decodes to a newline) — sanitize it so it can't forge log lines.
+    logger.info(
+        "%s %s → %s (%sms)",
+        request.method,
+        sanitize_for_log(request.url.path),
+        response.status_code,
+        duration,
+    )
     return response
 
 
@@ -163,7 +187,15 @@ class ChatContext(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
-    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Client-supplied; defaults to a server UUID when omitted. Constrained to a
+    # safe charset + length so a forged session_id can't smuggle control chars
+    # (the frontend always sends a uuidv4, which matches). Defense-in-depth on top
+    # of sanitize_for_log at the logging sinks.
+    session_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
     context: ChatContext = Field(default_factory=ChatContext)
 
 
@@ -210,7 +242,7 @@ async def chat(request: Request, req: ChatRequest):
         )
         return ChatResponse(response=response_text, session_id=req.session_id)
     except Exception as exc:
-        logger.error(f"Agent error for session {req.session_id}: {exc}", exc_info=True)
+        logger.error("Agent error for session %s: %s", sanitize_for_log(req.session_id), exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
 
@@ -245,7 +277,7 @@ async def chat_stream(request: Request, req: ChatRequest):
             ):
                 yield chunk
         except Exception as exc:
-            logger.error(f"Agent stream error for session {req.session_id}: {exc}", exc_info=True)
+            logger.error("Agent stream error for session %s: %s", sanitize_for_log(req.session_id), exc, exc_info=True)
             yield json.dumps({
                 "type": "error",
                 "message": "I ran into a technical issue generating that response. Please try again.",
