@@ -153,13 +153,31 @@ report as an artifact.
 ## Testing & CI
 
 Both services have automated suites that run in GitHub Actions on every PR and push to `main`, as
-independent path-filtered jobs plus a final `ci` aggregator suitable for a required branch-protection check.
+independent path-filtered jobs plus two always-on **security gates**, all folded into a final `ci`
+aggregator suitable for a required branch-protection check.
 
 - **Backend** — pytest: API routes, the theory engine, session memory, and chord/progression data
   integrity. `cd backend && pip install -r requirements-dev.txt && pytest -q`
 - **Frontend** — Vitest on the pure-logic units extracted out of React so they're testable in
   isolation: the `AgentAction` parser, the NDJSON stream-frame reassembly, and the server→backend
   header/URL helpers. `cd frontend && npm test`
+- **Secret-leak scan** — [`gitleaks`](https://github.com/gitleaks/gitleaks) scans every PR (full
+  history, redacted logs) for leaked credentials, with repo-specific rules in `.gitleaks.toml`
+  (DeepSeek key, internal token, OTEL auth header; `.env.example` and test fixtures allowlisted).
+- **SAST** — GitHub **CodeQL** analyzes Python and JS/TS for code vulnerabilities.
+
+### Auto-merge policy
+
+To keep human review light, PRs use **CI-gated auto-merge**: once a PR is open, auto-merge is
+enabled (`gh pr merge <#> --auto --squash --delete-branch`) and GitHub merges it **only after the
+`ci` check passes** (tests + secret scan + CodeQL), then deletes the branch. There is no
+self-approval (GitHub forbids it) — the green-CI gate is the review. This requires the repo to allow
+auto-merge and to require the `ci` status check on `main` (set once with
+`gh repo edit --enable-auto-merge --delete-branch-on-merge` plus a branch-protection rule). Branch
+protection is the safety net; the repo admin keeps a manual override for emergencies.
+
+> Dependency-vulnerability auditing (pip-audit / npm audit) was deliberately left out to avoid
+> blocking unrelated PRs on upstream advisories.
 
 ---
 

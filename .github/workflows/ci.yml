@@ -76,6 +76,46 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm test
 
+  # Secret-leak gate. Runs on EVERY PR + push (not path-filtered — a leaked key can
+  # land in any file). Uses the license-free gitleaks CLI rather than the GitHub
+  # Action (which needs a GITLEAKS_LICENSE for orgs). --redact keeps any matched
+  # secret out of the public Actions logs. Custom rules live in .gitleaks.toml.
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so the whole PR range is scanned
+      - name: Install gitleaks
+        run: |
+          version=8.21.2
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Scan for secrets
+        run: gitleaks detect --config .gitleaks.toml --redact --verbose --no-banner
+
+  # SAST gate. Analyzes both backend (Python) and frontend (JS/TS) for code
+  # vulnerabilities. Free on public repos. Gates the PR via the `ci` aggregator.
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
   # Full offline eval: runs the golden set through the real agent + LLM judge.
   # Costs real DeepSeek calls, so it does NOT run automatically — it is gated to
   # manual workflow_dispatch only (trigger it from the Actions tab when you want
@@ -120,17 +160,24 @@ jobs:
 
   # Single stable status check to require in branch protection. Always runs and
   # depends on the conditional jobs, so a PR that skips one (path filter) still
-  # reports green here instead of leaving a required check pending.
+  # reports green here instead of leaving a required check pending. The security
+  # gates (secrets, codeql) always run, so a `failure` from either fails the PR;
+  # the path-filtered functional jobs (backend, frontend) may legitimately skip.
   ci:
-    needs: [backend, frontend]
+    needs: [backend, frontend, secrets, codeql]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify upstream jobs succeeded or were skipped
         run: |
-          echo "backend: ${{ needs.backend.result }}"
+          echo "backend:  ${{ needs.backend.result }}"
           echo "frontend: ${{ needs.frontend.result }}"
-          if [[ "${{ needs.backend.result }}" == "failure" || "${{ needs.frontend.result }}" == "failure" ]]; then
+          echo "secrets:  ${{ needs.secrets.result }}"
+          echo "codeql:   ${{ needs.codeql.result }}"
+          if [[ "${{ needs.backend.result }}"  == "failure" || \
+                "${{ needs.frontend.result }}" == "failure" || \
+                "${{ needs.secrets.result }}"  == "failure" || \
+                "${{ needs.codeql.result }}"   == "failure" ]]; then
             echo "A required job failed."
             exit 1
           fi
