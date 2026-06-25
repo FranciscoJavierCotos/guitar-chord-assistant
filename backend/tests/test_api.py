@@ -38,6 +38,22 @@ class TestHealth:
         assert res.json() == {"status": "ok", "version": "1.0.0"}
 
 
+# ─── /api/health/db (authenticated DB connectivity probe, B0 #25) ──────────────
+class TestDbHealth:
+    def test_db_health_requires_token(self, client):
+        # Unlike /api/health, the DB probe is authenticated.
+        res = client.get("/api/health/db")
+        assert res.status_code == 401
+
+    def test_db_health_reports_unconfigured_without_supabase_env(self, client, monkeypatch):
+        # No SUPABASE_* env → graceful "unconfigured", not an error/500.
+        for var in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ANON_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        res = client.get("/api/health/db", headers=auth())
+        assert res.status_code == 200
+        assert res.json() == {"db": "unconfigured"}
+
+
 # ─── Shared-secret auth ─────────────────────────────────────────────────────────
 class TestAuth:
     def test_missing_token_is_rejected_401(self, client):

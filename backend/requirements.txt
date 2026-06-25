@@ -11,6 +11,11 @@ httpx>=0.27.2
 ddgs>=9.0.0
 slowapi>=0.1.9
 
+# Supabase (Postgres + Auth + RLS) — durable accounts & practice history (Epic B).
+# Backend uses the service-role key (RLS-bypassing) and, per-request, a user JWT
+# (RLS-enforced). See backend/db.py.
+supabase>=2.9.0,<3.0.0
+
 # ─── Observability (OpenTelemetry → Grafana Cloud, opt-in) ──────────────────────
 # Always installed so the OTel API used throughout the code resolves to real
 # objects; export is only switched on when OTEL_ENABLED + an OTLP endpoint are set

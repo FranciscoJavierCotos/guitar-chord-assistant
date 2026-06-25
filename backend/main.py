@@ -220,6 +220,23 @@ async def health():
     return {"status": "ok", "version": "1.0.0"}
 
 
+@app.get("/api/health/db", dependencies=[Depends(require_internal_token)])
+async def health_db():
+    """Authenticated DB connectivity probe (B0 — #25).
+
+    Kept off the public /api/health (which must stay open + stable for Render) so a
+    DB outage never fails the platform health check, and so the coarse status isn't
+    exposed unauthenticated. Returns {"db": "ok" | "unconfigured" | "error"} — never
+    the Supabase URL/key. Runs the (sync) supabase client in a threadpool so it
+    doesn't block the event loop.
+    """
+    import anyio
+
+    from db import check_connectivity
+
+    return await anyio.to_thread.run_sync(check_connectivity)
+
+
 @app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(require_internal_token)])
 @limiter.limit("20/minute")  # per real client IP
 @limiter.limit("500/day", key_func=lambda: "global")  # global cap to protect the DeepSeek bill

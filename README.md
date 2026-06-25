@@ -104,12 +104,17 @@ problems made this non-trivial:
   content it emits a `reset` frame and the client discards the flashed preamble — only the last
   content run, the real answer, survives. This also keeps session history clean.
 
-### Session memory (deliberately no database)
+### Session memory — in-process today, Supabase from here on
 
 Each session is an `InMemoryChatMessageHistory` plus a practice log and skill level in a plain dict
-keyed by UUID, with the last 10 turns windowed at read time and a 2-hour TTL. No database is an
-intentional MVP choice that keeps the deploy surface to one process per service; sessions reset on
-redeploy. The session UUID lives in `localStorage`, so conversations survive page refreshes.
+keyed by UUID, with the last 10 turns windowed at read time and a 2-hour TTL. This was an
+intentional MVP choice that kept the deploy surface to one process per service; sessions reset on
+redeploy, and the session UUID in `localStorage` lets conversations survive a page refresh.
+
+**Epic B (in progress) reverses that** for durable, multi-user data: a Supabase Postgres database
+with Auth and Row-Level Security now backs accounts, persistent conversations, and practice history.
+Story **B0** lays the foundation — the versioned schema, `pgvector`, and the RLS baseline (see
+[Data layer](#data-layer-supabase-epic-b)); later stories migrate the in-process store onto it.
 
 ---
 
@@ -222,9 +227,13 @@ Browser
                                agent/coach_agent.py        AgentExecutor + system prompt + streaming
                                agent/tools.py              13 @tool functions
                                agent/memory.py             in-process session store, 2-hour TTL
+                               db.py                       Supabase client (service-role + per-user RLS)
                                data/{chords,progressions}  40+ chords, 30+ named progressions
                                eval/                       offline answer-quality eval (python -m eval)
                                observability.py            opt-in OpenTelemetry (spans + metrics)
+
+supabase/migrations/          versioned SQL schema (profiles, conversations, messages,
+                               practice_events) + pgvector + RLS — the Epic B data layer
 ```
 
 The backend is deployed on a **public URL**, so it's hardened: every `/api/*` route except
@@ -248,6 +257,7 @@ handlers, which attach the secret server-side and forward the real client IP for
 | Diagrams | Hand-coded SVG React component (no charting library) |
 | API hardening | `slowapi` rate limiting + shared-secret (`X-Internal-Token`) auth |
 | Observability | OpenTelemetry (SDK + OTLP/HTTP + FastAPI auto-instr.) → Grafana Cloud (opt-in) |
+| Persistence & auth | Supabase (Postgres + Auth + Row-Level Security), `pgvector` for RAG — versioned SQL migrations (Epic B) |
 | Eval | Golden-set harness: deterministic graders + LLM-as-judge, CI-gated |
 | Deploy | Render — two public Web Services via a `render.yaml` Blueprint |
 
@@ -278,6 +288,39 @@ Both `INTERNAL_API_TOKEN` values must match, and both frontend env vars are **se
 
 ---
 
+## Data layer (Supabase, Epic B)
+
+Durable accounts and practice history live in a **Supabase** Postgres database (Postgres + Auth +
+Row-Level Security), with `pgvector` enabled for the RAG work in Epic C. The schema is **migration-
+driven** — versioned SQL under [`supabase/migrations/`](supabase/migrations/), checked into the repo
+and runnable locally or in CI.
+
+**Schema (story B0).** Four user-scoped tables, every one with **RLS enabled and owner-only
+policies** keyed on `auth.uid()`:
+
+| Table | Purpose | Owner check |
+|---|---|---|
+| `profiles` | 1:1 with `auth.users`; auto-created on signup via trigger | `id = auth.uid()` |
+| `conversations` | A user's chat threads | `user_id = auth.uid()` |
+| `messages` | Turns within a conversation (`role`, `content`, structured `agent_action` JSON) | via parent `conversations` |
+| `practice_events` | Append-only practice activity log | `user_id = auth.uid()` |
+
+The backend never trusts the client for ownership: RLS is the multi-tenant boundary. The
+service-role key (backend-only) bypasses RLS for admin tasks; all per-user access goes through the
+anon/publishable key plus the signed-in user's JWT, so PostgREST enforces the policies.
+
+**Config.** Backend (`backend/.env`): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (secret,
+backend-only), `SUPABASE_ANON_KEY`. Frontend (from B1): `NEXT_PUBLIC_SUPABASE_URL`,
+`NEXT_PUBLIC_SUPABASE_ANON_KEY` — the anon key is a *publishable* key, safe in the browser because
+RLS gates it; the service-role key must **never** be exposed. All are optional for the data-less
+MVP paths: with none set, `/api/health/db` reports `"unconfigured"` and the app still runs.
+
+**Applying migrations.** With the [Supabase CLI](https://supabase.com/docs/guides/local-development):
+`supabase db push` (linked project) or `supabase migration up` (local stack). The connectivity
+probe `GET /api/health/db` (authenticated) confirms the backend can reach the database.
+
+---
+
 ## API Reference
 
 > **Auth:** every endpoint except `/api/health` requires `X-Internal-Token: <INTERNAL_API_TOKEN>`
@@ -288,6 +331,7 @@ Both `INTERNAL_API_TOKEN` values must match, and both frontend env vars are **se
 | Endpoint | Method | Description |
 |---|---|---|
 | `/api/health` | GET | Health check (open — Render probe) |
+| `/api/health/db` | GET | Supabase connectivity probe → `{"db":"ok"\|"unconfigured"\|"error"}` (authenticated; not on the public health route) |
 | `/api/chat` | POST | Send a message; returns the full reply as JSON `{response, session_id}` |
 | `/api/chat/stream` | POST | Same body; streams the reply as NDJSON event frames (`status`/`token`/`reset`/`error`). Used by the frontend. |
 | `/api/chord/{name}` | GET | Chord fingering data (e.g. `Am`, `G7`) |
