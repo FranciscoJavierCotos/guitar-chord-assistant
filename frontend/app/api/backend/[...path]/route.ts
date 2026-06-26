@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { BACKEND_URL, backendHeaders, relay } from "@/lib/serverBackend";
+import { BACKEND_URL, backendHeaders, bearerHeader, relay } from "@/lib/serverBackend";
+import { getUserAccessToken } from "@/lib/supabase/server";
 
 /**
  * Catch-all server-side proxy for the non-chat backend endpoints the UI reads
@@ -19,7 +20,13 @@ async function proxy(
 ): Promise<Response> {
   const target = `${BACKEND_URL}/${path.join("/")}${req.nextUrl.search}`;
   try {
-    const res = await fetch(target, { method, headers: backendHeaders(req) });
+    // Forward the signed-in user's token so authenticated backend routes (e.g.
+    // /api/me) see the real user and RLS applies; omitted when anonymous.
+    const token = await getUserAccessToken();
+    const res = await fetch(target, {
+      method,
+      headers: backendHeaders(req, bearerHeader(token)),
+    });
     return relay(res);
   } catch {
     return NextResponse.json({ detail: "Failed to reach backend" }, { status: 502 });

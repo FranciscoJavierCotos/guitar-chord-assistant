@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { NextRequest } from "next/server";
-import { resolveBackendUrl, backendHeaders } from "@/lib/serverBackend";
+import { resolveBackendUrl, backendHeaders, bearerHeader } from "@/lib/serverBackend";
 
 /** Minimal NextRequest stand-in — backendHeaders only reads `headers.get`. */
 function mockRequest(headers: Record<string, string>): NextRequest {
@@ -82,5 +82,31 @@ describe("backendHeaders", () => {
     delete process.env.INTERNAL_API_TOKEN;
     const headers = backendHeaders(mockRequest({}));
     expect(headers["X-Internal-Token"]).toBe("");
+  });
+});
+
+describe("bearerHeader", () => {
+  it("builds an Authorization header from a token", () => {
+    expect(bearerHeader("abc.def.ghi")).toEqual({ Authorization: "Bearer abc.def.ghi" });
+  });
+
+  it("returns an empty object when there is no session (null)", () => {
+    expect(bearerHeader(null)).toEqual({});
+  });
+
+  it("returns an empty object when the token is undefined", () => {
+    expect(bearerHeader(undefined)).toEqual({});
+  });
+
+  it("returns an empty object for an empty-string token", () => {
+    // Anonymous: no Authorization header is sent, so the backend stays unauthenticated.
+    expect(bearerHeader("")).toEqual({});
+  });
+
+  it("spreads cleanly alongside other backend headers", () => {
+    process.env.INTERNAL_API_TOKEN = "secret-token";
+    const headers = backendHeaders(mockRequest({}), bearerHeader("tok-123"));
+    expect(headers["X-Internal-Token"]).toBe("secret-token");
+    expect(headers["Authorization"]).toBe("Bearer tok-123");
   });
 });

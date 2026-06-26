@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 import Chat from "@/components/Chat";
 import ProgressionDisplay from "@/components/ProgressionDisplay";
+import AuthNav from "@/components/AuthNav";
 import { ActiveProgression } from "@/lib/types";
 
 type MobileView = "chat" | "chords";
@@ -55,6 +56,7 @@ export default function Home() {
           </div>
         </div>
 
+        <AuthNav />
       </header>
 
       {/* ─── Mobile section switcher (hidden on desktop) ────────────────────── */}

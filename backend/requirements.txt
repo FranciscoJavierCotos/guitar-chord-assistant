@@ -16,6 +16,11 @@ slowapi>=0.1.9
 # (RLS-enforced). See backend/db.py.
 supabase>=2.9.0,<3.0.0
 
+# User-JWT verification (Epic B, story B1 — #26). PyJWT verifies Supabase access
+# tokens against the project's public JWKS; the [crypto] extra pulls in the
+# asymmetric algorithm backends (ES256/RS256/EdDSA). See backend/auth.py.
+PyJWT[crypto]>=2.9.0,<3.0.0
+
 # ─── Observability (OpenTelemetry → Grafana Cloud, opt-in) ──────────────────────
 # Always installed so the OTel API used throughout the code resolves to real
 # objects; export is only switched on when OTEL_ENABLED + an OTLP endpoint are set

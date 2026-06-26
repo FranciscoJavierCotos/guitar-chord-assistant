@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { updateSession } from "@/lib/supabase/middleware";
 
 /**
- * Lightweight per-IP edge rate limit for /api/* — a coarse first line of defence
- * in front of the backend's authoritative slowapi limits. In-memory and per
- * instance (best-effort, resets on redeploy); the backend remains the real cap.
+ * Edge middleware: (1) a coarse per-IP rate limit on /api/* in front of the
+ * backend's authoritative slowapi limits, and (2) Supabase auth-session refresh on
+ * every request (B1 — #26) so short-lived access tokens stay fresh across navigation.
  */
 const WINDOW_MS = 60_000;
 const MAX_REQUESTS = 60; // per IP per minute across all /api routes
@@ -21,18 +22,25 @@ function rateLimited(ip: string): boolean {
   return entry.count > MAX_REQUESTS;
 }
 
-export function middleware(req: NextRequest) {
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
-    req.headers.get("x-real-ip") ||
-    "unknown";
-
-  if (rateLimited(ip)) {
-    return NextResponse.json({ detail: "Too many requests." }, { status: 429 });
+export async function middleware(req: NextRequest) {
+  // Rate-limit /api/* first — cheap, and avoids spending a Supabase round-trip on
+  // requests we're about to reject.
+  if (req.nextUrl.pathname.startsWith("/api/")) {
+    const ip =
+      req.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
+      req.headers.get("x-real-ip") ||
+      "unknown";
+    if (rateLimited(ip)) {
+      return NextResponse.json({ detail: "Too many requests." }, { status: 429 });
+    }
   }
-  return NextResponse.next();
+
+  // Refresh the auth session and return the response carrying any rotated cookies.
+  return updateSession(req, NextResponse.next({ request: req }));
 }
 
 export const config = {
-  matcher: "/api/:path*",
+  // Run on app routes (for session refresh) and /api/* (rate limit), but skip
+  // static assets and image optimization to keep the edge path cheap.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };

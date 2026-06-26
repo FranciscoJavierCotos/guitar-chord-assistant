@@ -40,6 +40,17 @@ export function backendHeaders(
   return headers;
 }
 
+/**
+ * Build the Authorization header carrying a signed-in user's Supabase access token,
+ * or `{}` when there is no session (B1 — #26). The backend verifies this JWT
+ * (asymmetric JWKS) and runs RLS-scoped queries as that user. Kept separate + pure
+ * so route handlers can spread it conditionally and it stays unit-testable; the
+ * token itself is fetched server-side (httpOnly cookies) and never reaches the browser.
+ */
+export function bearerHeader(token: string | null | undefined): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 /** Pass the backend's response straight through, preserving status and body. */
 export async function relay(res: Response): Promise<Response> {
   const body = await res.text();
