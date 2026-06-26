@@ -243,6 +243,16 @@ locked to `FRONTEND_URL`, interactive docs are off in production, and a 16 KB bo
 The DeepSeek key never leaves the backend. The browser only ever hits same-origin Next.js route
 handlers, which attach the secret server-side and forward the real client IP for rate limiting.
 
+**User auth (Epic B — B1).** Accounts use **Supabase Auth** (email/password + email confirmation,
+password reset). The session lives in **httpOnly cookies** (`@supabase/ssr`) — the access token is
+never exposed to client JS. When signed in, the same-origin proxy forwards that token to the backend
+as a `Bearer`, and the backend **cryptographically verifies it against Supabase's public JWKS**
+(asymmetric algorithms only — HS256 is refused to block alg-confusion; `iss`/`aud`/`exp` checked) in
+`backend/auth.py`, with no JWT signing secret stored backend-side. A user-scoped route is therefore
+guarded by **three independent layers**: the proxy shared secret, the verified JWT, and Postgres RLS.
+The basic chat stays **anonymous**; account-scoped pages (e.g. the account page, and history /
+dashboard in later stories) require sign-in.
+
 ---
 
 ## Tech Stack
@@ -255,9 +265,10 @@ handlers, which attach the secret server-side and forward the real client IP for
 | Web search | DuckDuckGo (`ddgs`, queries fanned out concurrently — no API key) |
 | Frontend | Next.js 14.2 (App Router), React 18, TypeScript 5 (strict), Tailwind 3.4 |
 | Diagrams | Hand-coded SVG React component (no charting library) |
-| API hardening | `slowapi` rate limiting + shared-secret (`X-Internal-Token`) auth |
+| API hardening | `slowapi` rate limiting + shared-secret (`X-Internal-Token`) auth + verified Supabase user JWT (B1) |
 | Observability | OpenTelemetry (SDK + OTLP/HTTP + FastAPI auto-instr.) → Grafana Cloud (opt-in) |
 | Persistence & auth | Supabase (Postgres + Auth + Row-Level Security), `pgvector` for RAG — versioned SQL migrations (Epic B) |
+| Auth clients | `@supabase/ssr` + `@supabase/supabase-js` (httpOnly-cookie sessions); `PyJWT[crypto]` for backend JWKS verification |
 | Eval | Golden-set harness: deterministic graders + LLM-as-judge, CI-gated |
 | Deploy | Render — two public Web Services via a `render.yaml` Blueprint |
 
@@ -283,8 +294,10 @@ cp .env.example .env.local  # BACKEND_URL=http://localhost:8000 + the SAME INTER
 npm run dev                 # http://localhost:3000  (diagrams in isolation: /test-chord)
 ```
 
-Both `INTERNAL_API_TOKEN` values must match, and both frontend env vars are **server-only** (no
-`NEXT_PUBLIC_` prefix — that would ship a secret to the browser).
+Both `INTERNAL_API_TOKEN` values must match. `BACKEND_URL` + `INTERNAL_API_TOKEN` are **server-only**
+(no `NEXT_PUBLIC_` prefix — that would ship a secret to the browser). To enable accounts (B1), also
+set `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY` (the anon key is *publishable* by
+design); leave them unset and the auth UI hides while chat keeps working.
 
 ---
 
@@ -310,7 +323,7 @@ service-role key (backend-only) bypasses RLS for admin tasks; all per-user acces
 anon/publishable key plus the signed-in user's JWT, so PostgREST enforces the policies.
 
 **Config.** Backend (`backend/.env`): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (secret,
-backend-only), `SUPABASE_ANON_KEY`. Frontend (from B1): `NEXT_PUBLIC_SUPABASE_URL`,
+backend-only), `SUPABASE_ANON_KEY`. Frontend (`frontend/.env.local`): `NEXT_PUBLIC_SUPABASE_URL`,
 `NEXT_PUBLIC_SUPABASE_ANON_KEY` — the anon key is a *publishable* key, safe in the browser because
 RLS gates it; the service-role key must **never** be exposed. All are optional for the data-less
 MVP paths: with none set, `/api/health/db` reports `"unconfigured"` and the app still runs.
@@ -318,6 +331,19 @@ MVP paths: with none set, `/api/health/db` reports `"unconfigured"` and the app 
 **Applying migrations.** With the [Supabase CLI](https://supabase.com/docs/guides/local-development):
 `supabase db push` (linked project) or `supabase migration up` (local stack). The connectivity
 probe `GET /api/health/db` (authenticated) confirms the backend can reach the database.
+
+### Accounts & auth (story B1)
+
+Users sign up / sign in / sign out with **email + password** (email confirmation + password reset).
+The frontend holds the session in **httpOnly cookies** via `@supabase/ssr` (`frontend/lib/supabase/`),
+so the access token is never readable by client JS; `middleware.ts` refreshes it on each request. The
+same-origin proxy forwards the token to the backend, where `backend/auth.py` verifies it against the
+project's **public JWKS** (`<SUPABASE_URL>/auth/v1/.well-known/jwks.json`) — **asymmetric algorithms
+only** (HS256 refused, to block alg-confusion), with `iss`/`aud`/`exp` checks and no signing secret on
+the backend. `GET /api/me` exercises this end to end: it requires both the proxy token and a verified
+user JWT, and reads the caller's own `profiles` row through RLS. The `profiles` row is auto-created by
+the B0 signup trigger. **Supabase setup:** enable the Email provider with confirmations, use
+**asymmetric JWT signing keys**, and add your site + redirect URLs to the Auth allow-list.
 
 ---
 
@@ -332,6 +358,7 @@ probe `GET /api/health/db` (authenticated) confirms the backend can reach the da
 |---|---|---|
 | `/api/health` | GET | Health check (open — Render probe) |
 | `/api/health/db` | GET | Supabase connectivity probe → `{"db":"ok"\|"unconfigured"\|"error"}` (authenticated; not on the public health route) |
+| `/api/me` | GET | Signed-in user's own profile (B1). Needs the proxy token **and** a verified Supabase user JWT; reads via RLS. |
 | `/api/chat` | POST | Send a message; returns the full reply as JSON `{response, session_id}` |
 | `/api/chat/stream` | POST | Same body; streams the reply as NDJSON event frames (`status`/`token`/`reset`/`error`). Used by the frontend. |
 | `/api/chord/{name}` | GET | Chord fingering data (e.g. `Am`, `G7`) |

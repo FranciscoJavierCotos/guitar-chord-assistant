@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { BACKEND_URL, backendHeaders } from "@/lib/serverBackend";
+import { BACKEND_URL, backendHeaders, bearerHeader } from "@/lib/serverBackend";
+import { getUserAccessToken } from "@/lib/supabase/server";
 
 // Always run on the server at request time; never cache token-spending calls.
 export const dynamic = "force-dynamic";
@@ -7,9 +8,15 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.text();
+    // Chat stays anonymous, but forward the user's identity when signed in so the
+    // backend can attribute the turn (used from B2 onward). No session → no header.
+    const token = await getUserAccessToken();
     const res = await fetch(`${BACKEND_URL}/api/chat/stream`, {
       method: "POST",
-      headers: backendHeaders(req, { "Content-Type": "application/json" }),
+      headers: backendHeaders(req, {
+        "Content-Type": "application/json",
+        ...bearerHeader(token),
+      }),
       body,
     });
 

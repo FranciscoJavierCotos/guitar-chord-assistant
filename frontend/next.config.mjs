@@ -2,16 +2,28 @@
 
 // Content-Security-Policy for the public surface. 'unsafe-inline' is required for
 // Next.js's hydration bootstrap scripts and React inline style attributes; tighten
-// to nonces later if needed. connect-src is 'self' because the browser only ever
-// talks to our own origin — the backend is reached server-side via /api proxies.
-// In development only, Next.js's Fast Refresh / HMR runtime uses eval(), so
-// 'unsafe-eval' must be allowed there or the dev bundle is blocked and the page
-// never hydrates. Production (`next build && next start`) does not use eval, so it
-// stays out of the deployed policy.
+// to nonces later if needed. The backend is still reached server-side via /api
+// proxies, but the browser DOES talk directly to Supabase Auth (B1 — #26), so its
+// origin is added to connect-src when configured. In development only, Next.js's
+// Fast Refresh / HMR runtime uses eval(), so 'unsafe-eval' must be allowed there or
+// the dev bundle is blocked and the page never hydrates. Production
+// (`next build && next start`) does not use eval, so it stays out of the policy.
 const isDev = process.env.NODE_ENV !== "production";
 const scriptSrc = isDev
   ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
   : "script-src 'self' 'unsafe-inline'";
+
+// Allow XHR/fetch + websocket to the Supabase project origin (auth + realtime),
+// derived from the public URL so nothing is hard-coded. Empty when unset.
+let supabaseOrigin = "";
+try {
+  if (process.env.NEXT_PUBLIC_SUPABASE_URL) {
+    supabaseOrigin = new URL(process.env.NEXT_PUBLIC_SUPABASE_URL).origin;
+  }
+} catch {
+  /* malformed URL — leave connect-src at 'self' */
+}
+const connectSrc = ["connect-src 'self'", supabaseOrigin].filter(Boolean).join(" ");
 
 const csp = [
   "default-src 'self'",
@@ -19,7 +31,7 @@ const csp = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self' data:",
-  "connect-src 'self'",
+  connectSrc,
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",

@@ -31,6 +31,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 import observability
+from auth import AuthedUser, get_current_user
 
 load_dotenv()
 
@@ -235,6 +236,35 @@ async def health_db():
     from db import check_connectivity
 
     return await anyio.to_thread.run_sync(check_connectivity)
+
+
+@app.get("/api/me", dependencies=[Depends(require_internal_token)])
+async def me(user: "AuthedUser" = Depends(get_current_user)):
+    """The signed-in user's own profile (B1 — #26).
+
+    Two independent auth layers gate this route: the proxy shared secret
+    (`require_internal_token`) AND a cryptographically verified Supabase user JWT
+    (`get_current_user`, asymmetric JWKS). The profile itself is read through the
+    RLS-enforced user client, so the database — not this code — guarantees the
+    caller can only ever see their own row. Returns 401 on a missing/invalid token.
+
+    This is the end-to-end proof that authenticated identity now propagates from the
+    browser → same-origin proxy → backend → RLS. Later stories (B2+) reuse this path.
+    """
+    import anyio
+
+    from db import get_own_profile, supabase_configured
+
+    if not supabase_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured on the server.")
+
+    try:
+        profile = await anyio.to_thread.run_sync(get_own_profile, user.access_token)
+    except Exception as exc:  # noqa: BLE001 — never surface the stack/secret to the client
+        logger.error("Profile lookup failed for user %s: %s", sanitize_for_log(user.id), exc)
+        raise HTTPException(status_code=502, detail="Could not load profile.")
+
+    return {"id": user.id, "email": user.email, "profile": profile}
 
 
 @app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(require_internal_token)])

@@ -77,6 +77,25 @@ def get_user_client(access_token: str) -> "Client":
     return client
 
 
+def get_own_profile(access_token: str) -> Optional[dict]:
+    """Return the signed-in user's own `profiles` row, or None if it doesn't exist yet.
+
+    Goes through the RLS-enforced user client (B1 — #26): PostgREST runs the query with
+    the caller's JWT, so RLS guarantees only the user's own row can ever come back —
+    the backend never has to filter by id itself. The profile row is normally created
+    by the `on_auth_user_created` trigger (B0); None is a tolerated transient race.
+    """
+    client = get_user_client(access_token)
+    result = (
+        client.table("profiles")
+        .select("id, username, display_name, created_at, updated_at")
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
 def check_connectivity() -> dict[str, str]:
     """Confirm the backend can reach Supabase. Used by the DB health route.
 

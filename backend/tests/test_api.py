@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+from auth import AuthedUser, get_current_user
 
 TOKEN = "test-internal-token"
 
@@ -251,3 +252,55 @@ class TestAgentErrorSinkSanitized:
         msg = agent_errors[0].getMessage()
         assert "\n" not in msg and "\r" not in msg
         assert "550e8400-e29b-41d4-a716-446655440000" in msg
+
+
+# ─── /api/me (authenticated user profile, B1 #26) ──────────────────────────────
+class TestMe:
+    """Two independent gates: the proxy shared secret AND a verified Supabase JWT.
+    The JWT verification itself is unit-tested in test_auth.py; here we drive the
+    route, overriding get_current_user to stand in for a verified (or absent) user."""
+
+    def test_me_requires_internal_token(self, client):
+        # No proxy secret → blocked before any user-auth logic runs.
+        res = client.get("/api/me")
+        assert res.status_code == 401
+
+    def test_me_requires_bearer_token(self, client):
+        # Proxy secret present but no user JWT → get_current_user rejects with 401.
+        res = client.get("/api/me", headers=auth())
+        assert res.status_code == 401
+
+    def test_me_returns_profile_for_verified_user(self, client, monkeypatch):
+        import db
+
+        main.app.dependency_overrides[get_current_user] = lambda: AuthedUser(
+            id="user-1", email="player@example.com", access_token="tok"
+        )
+        monkeypatch.setattr(db, "supabase_configured", lambda: True)
+        monkeypatch.setattr(
+            db, "get_own_profile", lambda token: {"id": "user-1", "username": "ax", "display_name": None}
+        )
+        try:
+            res = client.get("/api/me", headers=auth())
+        finally:
+            main.app.dependency_overrides.pop(get_current_user, None)
+
+        assert res.status_code == 200
+        body = res.json()
+        assert body["id"] == "user-1"
+        assert body["email"] == "player@example.com"
+        assert body["profile"]["username"] == "ax"
+
+    def test_me_503_when_supabase_unconfigured(self, client, monkeypatch):
+        import db
+
+        main.app.dependency_overrides[get_current_user] = lambda: AuthedUser(
+            id="user-1", email=None, access_token="tok"
+        )
+        monkeypatch.setattr(db, "supabase_configured", lambda: False)
+        try:
+            res = client.get("/api/me", headers=auth())
+        finally:
+            main.app.dependency_overrides.pop(get_current_user, None)
+
+        assert res.status_code == 503
