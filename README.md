@@ -230,10 +230,11 @@ Browser
                                db.py                       Supabase client (service-role + per-user RLS)
                                data/{chords,progressions}  40+ chords, 30+ named progressions
                                eval/                       offline answer-quality eval (python -m eval)
+                               rag/                        RAG corpus + ingestion (python -m rag, Epic C)
                                observability.py            opt-in OpenTelemetry (spans + metrics)
 
 supabase/migrations/          versioned SQL schema (profiles, conversations, messages,
-                               practice_events) + pgvector + RLS — the Epic B data layer
+                               practice_events, kb_chunks) + pgvector + RLS — the Epic B/C data layer
 ```
 
 The backend is deployed on a **public URL**, so it's hardened: every `/api/*` route except
@@ -269,6 +270,7 @@ dashboard in later stories) require sign-in.
 | Observability | OpenTelemetry (SDK + OTLP/HTTP + FastAPI auto-instr.) → Grafana Cloud (opt-in) |
 | Persistence & auth | Supabase (Postgres + Auth + Row-Level Security), `pgvector` for RAG — versioned SQL migrations (Epic B) |
 | Auth clients | `@supabase/ssr` + `@supabase/supabase-js` (httpOnly-cookie sessions); `PyJWT[crypto]` for backend JWKS verification |
+| Embeddings | Google Gemini (`gemini-embedding-001` via `google-genai`), 768-dim — RAG corpus ingestion (C0) + query embeddings (C1) |
 | Eval | Golden-set harness: deterministic graders + LLM-as-judge, CI-gated |
 | Deploy | Render — two public Web Services via a `render.yaml` Blueprint |
 
@@ -344,6 +346,31 @@ the backend. `GET /api/me` exercises this end to end: it requires both the proxy
 user JWT, and reads the caller's own `profiles` row through RLS. The `profiles` row is auto-created by
 the B0 signup trigger. **Supabase setup:** enable the Email provider with confirmations, use
 **asymmetric JWT signing keys**, and add your site + redirect URLs to the Auth allow-list.
+
+### RAG corpus & ingestion (story C0)
+
+`public.kb_chunks` (migration `20260630223312_c0_kb_embeddings.sql`) holds a curated music-theory
+corpus — chunk text, `vector(768)` embeddings, and `source`/`title`/`url` metadata for citations —
+that the retrieval tool (story C1) will search over. Unlike the user-scoped tables above, it's
+**shared reference data**: RLS is enabled but the policy shape is public-read / service-role-write
+(only `python -m rag`'s service-role key can ever write it).
+
+`backend/rag/corpus/*.md` holds 12 hand-authored notes (intervals, scales, circle of fifths,
+diatonic triads, common progressions, modes, voice leading, open vs. barre chords, capo/
+transposition, strumming, fingerpicking) — original content, not scraped, so there's no copyright
+exposure. To (re)build the embeddings table:
+
+```bash
+cd chord-coach/backend
+# add GEMINI_API_KEY to .env (free key: https://aistudio.google.com/apikey)
+python -m rag --dry-run   # chunk + report word counts/cost without calling the API or touching the DB
+python -m rag             # chunk, embed via gemini-embedding-001, and upsert into kb_chunks
+```
+
+Ingestion is **idempotent**: each run deletes and reinserts the rows for every corpus `source`, then
+prunes any `source` no longer present on disk — re-running after an edit converges to the same state
+regardless of where a previous run stopped. Embedding the full ~25-40-chunk corpus costs well under
+$0.01 at Gemini's $0.15/1M-token rate, so re-running after small edits is effectively free.
 
 ---
 

@@ -85,11 +85,16 @@ backend/            FastAPI app — entry point: main.py
   db.py             Supabase client (service-role + per-user RLS) + connectivity check
   auth.py           Supabase user-JWT verification (asymmetric JWKS) — get_current_user (B1)
   eval/             offline agent eval harness (python -m eval)
+  rag/              RAG corpus + ingestion pipeline (Epic C, story C0 — python -m rag)
+    corpus/         12 hand-authored music-theory markdown notes (source of truth for kb_chunks)
+    chunking.py     parse_corpus_file: frontmatter + heading/paragraph chunking
+    embeddings.py   embed_texts: Gemini gemini-embedding-001, 768-dim, manual L2 norm
+    ingest.py       chunk -> embed -> delete-then-insert per source -> prune orphans
   observability.py  opt-in OpenTelemetry setup + agent/tool spans & metrics
   main.py           CORS, auth, rate limiting, request logging, all routes
 supabase/
-  migrations/       versioned SQL schema (Epic B): profiles, conversations, messages,
-                    practice_events + pgvector + RLS baseline
+  migrations/       versioned SQL schema (Epic B/C): profiles, conversations, messages,
+                    practice_events, kb_chunks + pgvector + RLS baseline
 observability/      reproducible Grafana dashboard JSON + runbook
 frontend/           Next.js 14 App Router app
   app/page.tsx      root layout — splits Chat (55%) and ChordDiagram (45%) panels
@@ -138,6 +143,19 @@ and a per-user client (anon key + user JWT, RLS-enforced). All `SUPABASE_*` env 
 expose `SUPABASE_SERVICE_ROLE_KEY` to the browser; the anon/publishable key is browser-safe (RLS
 gates it). When persisting/reading user data, go through RLS — don't trust the client for ownership.
 
+**RAG corpus (Epic C — story C0, #30).** `public.kb_chunks` (migration
+`20260630223312_c0_kb_embeddings.sql`) holds the curated music-theory corpus the retrieval tool (C1)
+will search over — `vector(768)` embeddings via `extensions.vector`, an HNSW cosine index, chunk
+text, and `source`/`title`/`url` for citation rendering. Unlike every other table here, it is
+**shared reference data, not per-user data**, so its RLS shape is deliberately public-read /
+service-role-write rather than owner-scoped on `auth.uid()`: RLS is enabled with only a
+`select using (true)` policy, and no insert/update/delete policy exists, so only the service-role
+key (used exclusively by `python -m rag`) can ever write it. `backend/rag/ingest.py` populates it by
+chunking `backend/rag/corpus/*.md`, embedding via Gemini (`backend/rag/embeddings.py`), and
+upserting idempotently (delete-and-reinsert per `source`, then orphan pruning). Embedding the full
+~25-40-chunk corpus costs well under $0.01 at Gemini's $0.15/1M-token rate — re-running ingestion
+after a corpus edit is effectively free.
+
 **Endpoints.** `POST /api/chat` returns the full reply as JSON. `POST /api/chat/stream` (used by
 the frontend) returns a chunked `text/plain` stream of **NDJSON frames** (one JSON object per line).
 `GET /api/health/db` (authenticated) is a Supabase connectivity probe, kept off the public
@@ -185,6 +203,7 @@ in `observability/`.
 | Persistence & auth | Supabase (Postgres + Auth + RLS) + `pgvector`; versioned SQL migrations (Epic B) — `supabase-py` client |
 | Auth (frontend) | Supabase Auth via `@supabase/ssr` (httpOnly-cookie sessions) + `@supabase/supabase-js` |
 | Auth (backend) | `PyJWT[crypto]` — verifies the Supabase user JWT against the project's public JWKS (asymmetric) |
+| Embeddings | Google Gemini (`gemini-embedding-001` via `google-genai`), 768-dim — RAG corpus ingestion (C0) + query embeddings (C1) |
 | Frontend | Next.js 14.2.15, React 18 (Node ≥20), TypeScript 5 (strict), Tailwind CSS 3.4.1 |
 | Markdown render | `react-markdown` + `remark-gfm` |
 | API hardening | `slowapi` rate limiting + shared-secret (`X-Internal-Token`) auth + verified user JWT (B1) |
@@ -288,7 +307,9 @@ updates; hit `GET /api/health`, `/api/chords`, `/api/progressions` after `data/`
 | `backend/agent/memory.py` | In-process session store, TTL eviction |
 | `backend/db.py` | Supabase client (service-role + per-user RLS) + `check_connectivity` + `get_own_profile` |
 | `backend/auth.py` | Supabase user-JWT verification (asymmetric JWKS) — `get_current_user` dependency (B1) |
-| `supabase/migrations/` | Versioned SQL schema: tables, pgvector, RLS policies (Epic B) |
+| `supabase/migrations/` | Versioned SQL schema: tables, pgvector, RLS policies (Epic B/C) |
+| `backend/rag/ingest.py` | `python -m rag` pipeline: chunk -> embed -> delete-then-insert -> prune orphans (C0) |
+| `backend/rag/embeddings.py` | `embed_texts()` — Gemini `gemini-embedding-001`, 768-dim, manual L2 normalization (C0) |
 | `backend/observability.py` | Opt-in OpenTelemetry: SDK/OTLP setup, spans, RED + domain metrics |
 | `backend/data/chords.py` | Chord fingering database |
 | `backend/data/progressions.py` | Progression dataset |
@@ -321,6 +342,7 @@ updates; hit `GET /api/health`, `/api/chords`, `/api/progressions` after `data/`
 | `SUPABASE_URL` | No* | — | Supabase project URL. *Required once persistence/auth (Epic B) is used; unset → `/api/health/db` = `unconfigured`. |
 | `SUPABASE_SERVICE_ROLE_KEY` | No* | — | **Secret, RLS-bypassing, backend-only.** Never returned/logged/`NEXT_PUBLIC_`. Powers `db.get_service_client`. |
 | `SUPABASE_ANON_KEY` | No* | — | Publishable key (browser-safe; RLS gates it). Per-user RLS-enforced client (`db.get_user_client`). |
+| `GEMINI_API_KEY` | No* | — | Google AI Studio key. *Required to run `python -m rag` (ingestion, C0) or the (future) retrieval tool (C1); unconfigured otherwise. Never returned/logged. |
 
 No new backend var for B1 auth: `backend/auth.py` derives the JWKS URL from `SUPABASE_URL` and uses the **public** keys, so there is **no** JWT signing secret to store backend-side.
 | `ENV` | No | `development` | `production` disables docs + drops localhost from CORS. |
