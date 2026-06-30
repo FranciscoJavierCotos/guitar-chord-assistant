@@ -78,8 +78,45 @@ def test_messages_ownership_derived_from_parent_conversation():
         assert "public.conversations" in p and "auth.uid()" in p
 
 
-def test_no_user_table_is_left_world_readable():
-    """Defense check: no `using (true)` / `with check (true)` slipped into a policy."""
+@pytest.mark.parametrize("table", USER_SCOPED_TABLES)
+def test_no_user_table_is_left_world_readable(table):
+    """Defense check: no user-scoped table's policy has `using (true)` / `with check
+    (true)` slipped in. Scoped to USER_SCOPED_TABLES (not the whole SQL blob) since
+    `kb_chunks` (story C0 — #30) is intentionally public-read reference data, not
+    user data — see test_kb_chunks_has_no_write_policy_for_anon below."""
     sql = _normalize(_sql())
-    assert "using (true)" not in sql
-    assert "with check (true)" not in sql
+    policies = re.findall(
+        rf'create policy "[^"]+" on public\.{table}\b.*?(?=create policy|alter table|$)', sql
+    )
+    assert policies, f"no policies defined for {table}"
+    for p in policies:
+        assert "using (true)" not in p, f"{table} has a world-readable policy: {p[:80]}"
+        assert "with check (true)" not in p, f"{table} has an unchecked write policy: {p[:80]}"
+
+
+def test_kb_chunks_table_and_hnsw_index_exist():
+    """C0 (#30): the embeddings table + its HNSW cosine index must exist."""
+    sql = _normalize(_sql())
+    assert re.search(r"create table public\.kb_chunks\b", sql)
+    assert "using hnsw" in sql
+    assert "vector_cosine_ops" in sql
+
+
+def test_kb_chunks_has_no_write_policy_for_anon():
+    """C0 (#30): kb_chunks is shared reference data — RLS enabled, public read, but
+    only the service-role key (which bypasses RLS) may ever write it. Proving no
+    insert/update/delete policy exists is what guarantees anon/authenticated roles
+    can never modify the corpus."""
+    sql = _normalize(_sql())
+    assert "alter table public.kb_chunks enable row level security" in sql
+
+    policies = re.findall(
+        r'create policy "[^"]+" on public\.kb_chunks\b.*?(?=create policy|alter table|$)', sql
+    )
+    assert policies, "kb_chunks has no policies at all"
+    kinds = {
+        m.group(1)
+        for p in policies
+        if (m := re.search(r"for (select|insert|update|delete)", p))
+    }
+    assert kinds == {"select"}, f"kb_chunks should only have a select policy, found {kinds}"

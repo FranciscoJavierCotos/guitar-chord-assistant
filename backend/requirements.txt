@@ -21,6 +21,11 @@ supabase>=2.9.0,<3.0.0
 # asymmetric algorithm backends (ES256/RS256/EdDSA). See backend/auth.py.
 PyJWT[crypto]>=2.9.0,<3.0.0
 
+# Embeddings for the RAG corpus (Epic C, story C0 — #30) and query-time retrieval
+# (C1, #31). DeepSeek has no embeddings endpoint, so Gemini is the second provider.
+# See backend/rag/embeddings.py.
+google-genai>=2.8.0,<3.0.0
+
 # ─── Observability (OpenTelemetry → Grafana Cloud, opt-in) ──────────────────────
 # Always installed so the OTel API used throughout the code resolves to real
 # objects; export is only switched on when OTEL_ENABLED + an OTLP endpoint are set
