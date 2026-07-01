@@ -104,17 +104,24 @@ problems made this non-trivial:
   content it emits a `reset` frame and the client discards the flashed preamble — only the last
   content run, the real answer, survives. This also keeps session history clean.
 
-### Session memory — in-process today, Supabase from here on
+### Session memory — in-process for anonymous chat, Supabase for signed-in users
 
 Each session is an `InMemoryChatMessageHistory` plus a practice log and skill level in a plain dict
 keyed by UUID, with the last 10 turns windowed at read time and a 2-hour TTL. This was an
 intentional MVP choice that kept the deploy surface to one process per service; sessions reset on
-redeploy, and the session UUID in `localStorage` lets conversations survive a page refresh.
+redeploy, and the session UUID in `localStorage` lets conversations survive a page refresh. Chat
+stays usable anonymously this way — no account required.
 
-**Epic B (in progress) reverses that** for durable, multi-user data: a Supabase Postgres database
-with Auth and Row-Level Security now backs accounts, persistent conversations, and practice history.
-Story **B0** lays the foundation — the versioned schema, `pgvector`, and the RLS baseline (see
-[Data layer](#data-layer-supabase-epic-b)); later stories migrate the in-process store onto it.
+**Epic B reverses that for signed-in users.** A Supabase Postgres database with Auth and
+Row-Level Security backs accounts, persistent conversations, and (later) practice history. Story
+**B0** laid the foundation — the versioned schema, `pgvector`, and the RLS baseline (see
+[Data layer](#data-layer-supabase-epic-b)). Story **B2** wired chat itself to it: when a request
+carries a verified Supabase user JWT, `/api/chat` and `/api/chat/stream` load/persist that turn's
+history through `agent/conversation_store.py` (`conversations`/`messages`, RLS-scoped to the user)
+instead of the in-process dict — the session UUID doubles as the `conversations.id`, so history now
+survives a backend restart and is readable from `GET /api/conversations` / `GET
+/api/conversations/{id}`. Anonymous chat, and the practice-log/skill-level side of a session, are
+unaffected — those still live in the in-process store until a later story (B3) moves them too.
 
 ---
 
@@ -226,7 +233,8 @@ Browser
                                main.py                    routes, CORS, auth, rate limiting
                                agent/coach_agent.py        AgentExecutor + system prompt + streaming
                                agent/tools.py              14 @tool functions
-                               agent/memory.py             in-process session store, 2-hour TTL
+                               agent/memory.py             in-process session store, 2-hour TTL (anonymous chat)
+                               agent/conversation_store.py Postgres-backed chat history for signed-in users (B2)
                                db.py                       Supabase client (service-role + per-user RLS)
                                data/{chords,progressions}  40+ chords, 30+ named progressions
                                eval/                       offline answer-quality eval (python -m eval)
@@ -251,8 +259,10 @@ as a `Bearer`, and the backend **cryptographically verifies it against Supabase'
 (asymmetric algorithms only — HS256 is refused to block alg-confusion; `iss`/`aud`/`exp` checked) in
 `backend/auth.py`, with no JWT signing secret stored backend-side. A user-scoped route is therefore
 guarded by **three independent layers**: the proxy shared secret, the verified JWT, and Postgres RLS.
-The basic chat stays **anonymous**; account-scoped pages (e.g. the account page, and history /
-dashboard in later stories) require sign-in.
+The basic chat stays **anonymous**; account-scoped pages (e.g. the account page, and a
+dashboard in a later story) require sign-in. Chat itself is opt-in: sign in and it's automatically
+persisted to Postgres (Epic B — **B2**) via that same verified JWT; stay anonymous and it still works,
+just ephemeral (in-process, 2-hour TTL) as before.
 
 ---
 
@@ -347,6 +357,19 @@ user JWT, and reads the caller's own `profiles` row through RLS. The `profiles` 
 the B0 signup trigger. **Supabase setup:** enable the Email provider with confirmations, use
 **asymmetric JWT signing keys**, and add your site + redirect URLs to the Auth allow-list.
 
+### Persisted conversations (story B2)
+
+Signed-in users get durable chat history instead of the 2-hour in-process store. `/api/chat` and
+`/api/chat/stream` take an optional `Authorization: Bearer` (forwarded by the proxy exactly like
+B1); when it verifies, `backend/agent/conversation_store.py`'s `SupabaseChatMessageHistory` loads
+and appends turns through the RLS-scoped user client instead of `agent/memory.py`'s dict. The
+frontend's per-browser `session_id` (a client-generated UUID, already sent on every chat request)
+doubles as the `conversations.id` primary key, so no new client-side identifier was needed. A
+persistence failure (e.g. a transient Supabase error) is logged and swallowed rather than surfacing
+as a chat error — the user still gets their answer even if that turn didn't save. `GET
+/api/conversations` lists a signed-in user's conversations; `GET /api/conversations/{id}` fetches
+one with its messages — both RLS-scoped, so `id` collisions or guesses never leak another user's data.
+
 ### RAG corpus & ingestion (story C0)
 
 `public.kb_chunks` (migration `20260630223312_c0_kb_embeddings.sql`) holds a curated music-theory
@@ -399,12 +422,14 @@ runtime theory engine.
 | `/api/health` | GET | Health check (open — Render probe) |
 | `/api/health/db` | GET | Supabase connectivity probe → `{"db":"ok"\|"unconfigured"\|"error"}` (authenticated; not on the public health route) |
 | `/api/me` | GET | Signed-in user's own profile (B1). Needs the proxy token **and** a verified Supabase user JWT; reads via RLS. |
-| `/api/chat` | POST | Send a message; returns the full reply as JSON `{response, session_id}` |
-| `/api/chat/stream` | POST | Same body; streams the reply as NDJSON event frames (`status`/`token`/`reset`/`error`). Used by the frontend. |
+| `/api/chat` | POST | Send a message; returns the full reply as JSON `{response, session_id}`. Signed in (optional `Authorization: Bearer`) → persisted to Postgres (B2); anonymous → in-process, 2-hour TTL. |
+| `/api/chat/stream` | POST | Same body/auth; streams the reply as NDJSON event frames (`status`/`token`/`reset`/`error`). Used by the frontend. |
+| `/api/conversations` | GET | Signed-in user's persisted conversations, newest-active first (B2). Needs the proxy token **and** a verified Supabase user JWT. |
+| `/api/conversations/{id}` | GET | One persisted conversation with its messages (B2). Same auth as above; 404 if it doesn't exist or isn't yours. |
 | `/api/chord/{name}` | GET | Chord fingering data (e.g. `Am`, `G7`) |
 | `/api/chords` | GET | All chords |
 | `/api/progressions` | GET | All progressions; filter `?genre=blues` or `?key=E` |
-| `/api/session/{id}` | DELETE | Clear a session's memory |
+| `/api/session/{id}` | DELETE | Clear a session's in-process memory (anonymous chat / practice log — B2 persisted conversations aren't affected) |
 | `/api/session/{id}/practice-log` | GET | Session practice history + skill level |
 
 **Chat request body:**
