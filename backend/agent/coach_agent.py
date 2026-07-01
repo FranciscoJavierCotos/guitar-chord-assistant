@@ -4,18 +4,22 @@ instead of text-based ReAct, which is more reliable and uses fewer LLM calls.
 """
 
 import json
+import logging
 import os
+import anyio
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage
 
 import time
 
+from agent.conversation_store import ChatHistoryLike
 from agent.memory import HISTORY_WINDOW_TURNS
 from agent.tools import TOOLS, _current_session_id
 from observability import agent_run_span, get_agent_callback, record_ttft
+
+logger = logging.getLogger("chordcoach.agent")
 
 # Prefix of the user-facing fallback returned by run_agent when the agent turn
 # raises (bad/expired API key, network failure, provider 5xx, …). Exported so
@@ -233,7 +237,7 @@ def build_agent_executor(temperature: float | None = None) -> AgentExecutor:
     )
 
 
-def _windowed(history: InMemoryChatMessageHistory) -> list:
+def _windowed(history: ChatHistoryLike) -> list:
     """Return the last HISTORY_WINDOW_TURNS turns (human+AI pairs) of history."""
     return history.messages[-(HISTORY_WINDOW_TURNS * 2):]
 
@@ -258,7 +262,7 @@ def _apply_context_prefix(message: str, context: dict | None) -> str:
 
 async def run_agent(
     message: str,
-    history: InMemoryChatMessageHistory,
+    history: ChatHistoryLike,
     context: dict | None = None,
     session_id: str = "",
     temperature: float | None = None,
@@ -279,7 +283,15 @@ async def run_agent(
         # back instead of surfacing as a blank answer.
         output = result.get("output") or "I couldn't generate a response. Please try again."
         # Persist the turn so subsequent requests in this session have context.
-        history.add_messages([HumanMessage(content=message), AIMessage(content=output)])
+        # Off-loaded to a thread since the B2 (#27) Postgres-backed history does
+        # network I/O here; wrapped separately so a persistence failure (e.g. a
+        # transient Supabase error) never discards an answer the user already got.
+        try:
+            await anyio.to_thread.run_sync(
+                history.add_messages, [HumanMessage(content=message), AIMessage(content=output)]
+            )
+        except Exception as exc:  # noqa: BLE001 — log and keep the real answer
+            logger.warning("Failed to persist conversation turn (session %s): %s", session_id, exc)
         return output
     except Exception as exc:
         return (
@@ -298,7 +310,7 @@ def _frame(payload: dict) -> str:
 
 async def run_agent_stream(
     message: str,
-    history: InMemoryChatMessageHistory,
+    history: ChatHistoryLike,
     context: dict | None = None,
     session_id: str = "",
 ):
@@ -384,6 +396,14 @@ async def run_agent_stream(
 
             full = "".join(collected)
             if full:
-                history.add_messages([HumanMessage(content=message), AIMessage(content=full)])
+                # See run_agent's matching comment: off-loaded + isolated so a
+                # persistence failure can't surface as a stream error after the
+                # client already rendered the real answer.
+                try:
+                    await anyio.to_thread.run_sync(
+                        history.add_messages, [HumanMessage(content=message), AIMessage(content=full)]
+                    )
+                except Exception as exc:  # noqa: BLE001 — log and move on
+                    logger.warning("Failed to persist conversation turn (session %s): %s", session_id, exc)
     finally:
         _current_session_id.reset(token)
