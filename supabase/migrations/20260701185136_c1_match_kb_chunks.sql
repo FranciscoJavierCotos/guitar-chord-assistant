@@ -4,7 +4,9 @@
 -- or an ORDER BY on it, so the retrieval tool (backend/rag/retrieval.py) calls this
 -- function via `.rpc(...)` instead of `.table("kb_chunks")`. `language sql` (not
 -- plpgsql) since it's a single query; `stable` because it only reads; `search_path`
--- pinned to '' per the B0 hardening convention, so every identifier is schema-qualified.
+-- pinned to '' per the B0 hardening convention, so every identifier is schema-qualified
+-- — including the `<=>` operator itself, which needs the explicit `OPERATOR(schema.op)`
+-- form since a plain `<=>` is resolved via search_path, and that's empty here.
 create or replace function public.match_kb_chunks(
   query_embedding extensions.vector(768),
   match_count int default 5
@@ -25,9 +27,9 @@ as $$
     kb_chunks.title,
     kb_chunks.url,
     kb_chunks.content,
-    1 - (kb_chunks.embedding <=> query_embedding) as similarity
+    1 - (kb_chunks.embedding operator(extensions.<=>) query_embedding) as similarity
   from public.kb_chunks
-  order by kb_chunks.embedding <=> query_embedding
+  order by kb_chunks.embedding operator(extensions.<=>) query_embedding
   limit least(greatest(match_count, 1), 20)
 $$;
 
