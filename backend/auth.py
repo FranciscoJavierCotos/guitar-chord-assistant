@@ -131,3 +131,20 @@ async def get_current_user(
     """
     token = _bearer_token(authorization)
     return await anyio.to_thread.run_sync(_verify_token, token)
+
+
+async def get_current_user_optional(
+    authorization: Optional[str] = Header(default=None),
+) -> Optional[AuthedUser]:
+    """Like `get_current_user`, but returns None instead of 401 when there's no
+    bearer token at all (used by routes that stay usable anonymously — e.g. chat,
+    B2 #27 — but attribute the turn to a real user when one is signed in).
+
+    A *present but invalid* token still 401s: an expired/tampered token is
+    anomalous (the frontend only ever attaches a live Supabase session), so
+    silently downgrading it to "anonymous" would mask that instead of surfacing it.
+    """
+    if not authorization:
+        return None
+    token = _bearer_token(authorization)
+    return await anyio.to_thread.run_sync(_verify_token, token)

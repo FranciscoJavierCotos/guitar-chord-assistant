@@ -79,6 +79,16 @@ def test_supabase_configured_true_with_url_and_service_key(monkeypatch):
     assert db.supabase_configured() is True
 
 
+def test_supabase_user_configured_false_when_unset():
+    assert db.supabase_user_configured() is False
+
+
+def test_supabase_user_configured_true_with_url_and_anon_key(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-pub")
+    assert db.supabase_user_configured() is True
+
+
 # ─── get_service_client ─────────────────────────────────────────────────────────
 def test_service_client_raises_when_unconfigured():
     with pytest.raises(RuntimeError):
@@ -131,3 +141,92 @@ def test_connectivity_error_is_caught_and_typed(monkeypatch):
     result = db.check_connectivity()
     assert result["db"] == "error"
     assert result["detail"] == "RuntimeError"  # type name only — never the message/secret
+
+
+# ─── list_conversations / get_conversation (B2 — #27) ──────────────────────────
+def _install_conversations_fake(monkeypatch, *, conversations=None, messages=None):
+    """A richer fake `supabase` module supporting .eq()/.order() chains, filtering
+    an in-memory dataset by the last .eq() call — enough to drive db.py's
+    conversation queries without a real Postgres/PostgREST round-trip."""
+    conversations = conversations if conversations is not None else []
+    messages = messages if messages is not None else []
+
+    class _Query:
+        def __init__(self, table_name):
+            self._table = table_name
+            self._eq = None
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, col, val):
+            self._eq = (col, val)
+            return self
+
+        def order(self, *a, **k):
+            return self
+
+        def limit(self, *a, **k):
+            return self
+
+        def execute(self):
+            rows = conversations if self._table == "conversations" else messages
+            if self._eq:
+                col, val = self._eq
+                rows = [r for r in rows if r.get(col) == val]
+            return types.SimpleNamespace(data=rows)
+
+    class _PostgREST:
+        def auth(self, token):
+            pass
+
+    class _Client:
+        def __init__(self):
+            self.postgrest = _PostgREST()
+
+        def table(self, name):
+            return _Query(name)
+
+    fake = types.ModuleType("supabase")
+    fake.create_client = lambda url, key: _Client()
+    fake.Client = _Client
+    monkeypatch.setitem(sys.modules, "supabase", fake)
+
+
+def _configure_user_env(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-pub")
+
+
+def test_list_conversations_returns_only_rows_from_the_table(monkeypatch):
+    _configure_user_env(monkeypatch)
+    convs = [{"id": "c1", "title": "Blues progressions", "updated_at": "2026-07-01"}]
+    _install_conversations_fake(monkeypatch, conversations=convs)
+    assert db.list_conversations("jwt") == convs
+
+
+def test_list_conversations_empty_when_none_exist(monkeypatch):
+    _configure_user_env(monkeypatch)
+    _install_conversations_fake(monkeypatch, conversations=[])
+    assert db.list_conversations("jwt") == []
+
+
+def test_get_conversation_returns_none_when_not_found_or_not_owned(monkeypatch):
+    # RLS makes "doesn't exist" and "exists but belongs to someone else" the same
+    # empty result from the caller's point of view — both must resolve to None.
+    _configure_user_env(monkeypatch)
+    _install_conversations_fake(monkeypatch, conversations=[], messages=[])
+    assert db.get_conversation("jwt", "missing-id") is None
+
+
+def test_get_conversation_returns_conversation_with_its_messages(monkeypatch):
+    _configure_user_env(monkeypatch)
+    convs = [{"id": "c1", "title": "Blues progressions"}]
+    msgs = [
+        {"conversation_id": "c1", "role": "user", "content": "give me a blues progression"},
+        {"conversation_id": "c1", "role": "assistant", "content": "Try E7-A7-B7…"},
+    ]
+    _install_conversations_fake(monkeypatch, conversations=convs, messages=msgs)
+    result = db.get_conversation("jwt", "c1")
+    assert result["id"] == "c1"
+    assert result["messages"] == msgs

@@ -30,8 +30,10 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+import anyio
+
 import observability
-from auth import AuthedUser, get_current_user
+from auth import AuthedUser, get_current_user, get_current_user_optional
 
 load_dotenv()
 
@@ -214,6 +216,41 @@ def _get_agent_modules():
     return run_agent, get_history, clear_memory, CHORDS, get_chord, PROGRESSIONS, get_progressions_by_genre, get_progressions_by_key
 
 
+async def _resolve_history(session_id: str, user: "AuthedUser | None"):
+    """Pick the chat-history backend for this turn (B2 — #27).
+
+    Anonymous requests (no verified user) keep using the in-process store — chat
+    stays usable without an account. A signed-in user's turns are persisted to
+    Postgres instead, scoped to them via RLS, so history survives a backend
+    restart and future requests (any device, any session) can load it back.
+
+    `session_id` doubles as the `conversations.id` — see conversation_store.py's
+    module docstring for why. Falls back to the in-process store (with a logged
+    warning) if Supabase isn't configured or the load fails, so a DB hiccup
+    degrades chat rather than breaking it.
+    """
+    from agent.memory import get_history
+
+    if user is not None:
+        import db
+
+        if db.supabase_user_configured():
+            from agent.conversation_store import SupabaseChatMessageHistory
+
+            try:
+                return await anyio.to_thread.run_sync(
+                    SupabaseChatMessageHistory, session_id, user.id, user.access_token
+                )
+            except Exception as exc:  # noqa: BLE001 — degrade to in-memory, don't break chat
+                logger.error(
+                    "Failed to load persisted conversation for user %s, falling back to "
+                    "in-memory history: %s",
+                    sanitize_for_log(user.id),
+                    exc,
+                )
+    return get_history(session_id)
+
+
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
@@ -231,8 +268,6 @@ async def health_db():
     the Supabase URL/key. Runs the (sync) supabase client in a threadpool so it
     doesn't block the event loop.
     """
-    import anyio
-
     from db import check_connectivity
 
     return await anyio.to_thread.run_sync(check_connectivity)
@@ -251,8 +286,6 @@ async def me(user: "AuthedUser" = Depends(get_current_user)):
     This is the end-to-end proof that authenticated identity now propagates from the
     browser → same-origin proxy → backend → RLS. Later stories (B2+) reuse this path.
     """
-    import anyio
-
     from db import get_own_profile, supabase_configured
 
     if not supabase_configured():
@@ -270,17 +303,21 @@ async def me(user: "AuthedUser" = Depends(get_current_user)):
 @app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(require_internal_token)])
 @limiter.limit("20/minute")  # per real client IP
 @limiter.limit("500/day", key_func=lambda: "global")  # global cap to protect the DeepSeek bill
-async def chat(request: Request, req: ChatRequest):
+async def chat(
+    request: Request,
+    req: ChatRequest,
+    user: "AuthedUser | None" = Depends(get_current_user_optional),
+):
     if not os.getenv("DEEPSEEK_API_KEY"):
         raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY not configured on the server.")
 
     try:
-        run_agent, get_history, _, _, _, _, _, _ = _get_agent_modules()
+        run_agent, _, _, _, _, _, _, _ = _get_agent_modules()
     except ImportError as e:
         raise HTTPException(status_code=503, detail=f"Agent modules not available: {e}")
 
     try:
-        history = get_history(req.session_id)
+        history = await _resolve_history(req.session_id, user)
         response_text = await run_agent(
             message=req.message,
             history=history,
@@ -296,7 +333,11 @@ async def chat(request: Request, req: ChatRequest):
 @app.post("/api/chat/stream", dependencies=[Depends(require_internal_token)])
 @limiter.limit("20/minute")  # per real client IP
 @limiter.limit("500/day", key_func=lambda: "global")  # global cap to protect the DeepSeek bill
-async def chat_stream(request: Request, req: ChatRequest):
+async def chat_stream(
+    request: Request,
+    req: ChatRequest,
+    user: "AuthedUser | None" = Depends(get_current_user_optional),
+):
     """Streaming variant of /api/chat. Returns the agent turn as a chunked
     text/plain stream of NDJSON event frames (one JSON object per line):
     {"type":"status",...} progress, {"type":"token",...} answer deltas, and
@@ -308,11 +349,10 @@ async def chat_stream(request: Request, req: ChatRequest):
 
     try:
         from agent.coach_agent import run_agent_stream
-        from agent.memory import get_history
     except ImportError as e:
         raise HTTPException(status_code=503, detail=f"Agent modules not available: {e}")
 
-    history = get_history(req.session_id)
+    history = await _resolve_history(req.session_id, user)
 
     async def token_stream():
         try:
@@ -406,6 +446,61 @@ async def get_practice_log_endpoint(session_id: str):
         "practice_log": data["practice_log"],
         "skill_level": data["skill_level"],
     }
+
+
+@app.get("/api/conversations", dependencies=[Depends(require_internal_token)])
+async def list_conversations_endpoint(user: "AuthedUser" = Depends(get_current_user)):
+    """List the signed-in user's persisted conversations (B2 — #27), newest-active
+    first. Same two-gate shape as /api/me: proxy secret + verified user JWT, then
+    an RLS-scoped read so the database enforces the caller only sees their own.
+    """
+    from db import list_conversations, supabase_user_configured
+
+    if not supabase_user_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured on the server.")
+
+    try:
+        conversations = await anyio.to_thread.run_sync(list_conversations, user.access_token)
+    except Exception as exc:  # noqa: BLE001 — never surface the stack/secret to the client
+        logger.error("Failed to list conversations for user %s: %s", sanitize_for_log(user.id), exc)
+        raise HTTPException(status_code=502, detail="Could not load conversations.")
+
+    return {"conversations": conversations}
+
+
+@app.get("/api/conversations/{conversation_id}", dependencies=[Depends(require_internal_token)])
+async def get_conversation_endpoint(
+    conversation_id: str, user: "AuthedUser" = Depends(get_current_user)
+):
+    """Fetch one persisted conversation with its messages (B2 — #27). 404 covers
+    both "doesn't exist" and "exists but isn't yours" — RLS makes those
+    indistinguishable from the caller's side, which is the correct behaviour for
+    an ownership boundary (never reveal that someone else's conversation id is valid).
+    """
+    try:
+        uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    from db import get_conversation, supabase_user_configured
+
+    if not supabase_user_configured():
+        raise HTTPException(status_code=503, detail="Supabase is not configured on the server.")
+
+    try:
+        conversation = await anyio.to_thread.run_sync(get_conversation, user.access_token, conversation_id)
+    except Exception as exc:  # noqa: BLE001 — never surface the stack/secret to the client
+        logger.error(
+            "Failed to load conversation %s for user %s: %s",
+            sanitize_for_log(conversation_id),
+            sanitize_for_log(user.id),
+            exc,
+        )
+        raise HTTPException(status_code=502, detail="Could not load conversation.")
+
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return conversation
 
 
 @app.exception_handler(Exception)

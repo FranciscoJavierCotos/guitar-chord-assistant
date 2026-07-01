@@ -47,16 +47,16 @@ new contributor reading the docs now be misled?"
 ## Engineering journal (Obsidian vault)
 
 A running log of **what was built**, separate from the living docs above. Lives in the Obsidian
-vault at `C:\Users\franc\Documents\Obsidian\Vault\ChordCoach` (outside the repo — not committed).
-Every bug fix, feature, refactor, chore, or docs change gets **its own page**; a master index page
-tracks pending issues.
+vault at `C:\Users\franc\Documents\Obsidian\Vault\Project Journals\ChordCoach` (outside the repo —
+not committed). Every bug fix, feature, refactor, chore, or docs change gets **its own page**; a
+master index page tracks pending issues.
 
-**Structure**
-- `ChordCoach/_Database.md` — master index. Two tables (**Pending / in progress** and **Done**) plus
+**Structure** (all paths below relative to `Project Journals\ChordCoach\`)
+- `_Database.md` — master index. Two tables (**Pending / in progress** and **Done**) plus
   optional Dataview blocks. This is the page to open to see outstanding work.
-- `ChordCoach/Changes/` — one page per change, named `YYYY-MM-DD-<type>-<slug>.md` (e.g.
+- `Changes/` — one page per change, named `YYYY-MM-DD-<type>-<slug>.md` (e.g.
   `2026-06-22-bug-stream-preamble-leak.md`). `type` ∈ `bug | feature | refactor | chore | docs`.
-- `ChordCoach/Templates/Change.md` — the page template (frontmatter: `title`, `type`, `status`,
+- `Templates/Change.md` — the page template (frontmatter: `title`, `type`, `status`,
   `issue`, `pr`, `branch`, `created`, `updated`, `tags`). `status` ∈ `pending | in-progress | done`.
 
 **When (same change, before the PR — like the docs rule above)**
@@ -78,7 +78,8 @@ backend/            FastAPI app — entry point: main.py
   agent/
     coach_agent.py  builds + runs the LangChain AgentExecutor (run_agent + run_agent_stream)
     tools.py        14 @tool functions (chord lookup, theory, RAG retrieval, web search, practice log)
-    memory.py       in-process session store (dict, auto-expires after 2 h)
+    memory.py       in-process session store (dict, auto-expires after 2 h) — anonymous chat
+    conversation_store.py  Postgres-backed chat history for signed-in users (RLS-scoped, B2)
   data/
     chords.py       static dict of 40+ chord fingerings
     progressions.py static list of 30+ named progressions
@@ -170,14 +171,35 @@ chat sessions too. The system prompt (`coach_agent.py`) directs the agent to cal
 conceptual theory questions (not for analyzing a specific progression — that's still
 `explain_theory`) and ground its answer in the returned passages.
 
+**Persisted conversations (Epic B — story B2, #27).** `agent/conversation_store.py`'s
+`SupabaseChatMessageHistory` is a duck-typed drop-in for `InMemoryChatMessageHistory` (`.messages`
++ `.add_messages(...)`, formalized as the `ChatHistoryLike` protocol) that reads/writes
+`conversations`/`messages` through the RLS-scoped user client instead of the in-process dict. Both
+chat routes take an **optional** verified user (`get_current_user_optional` — present token → same
+verification as `get_current_user`; absent token → `None`, chat stays anonymous); `main.py`'s
+`_resolve_history` picks the backend per request: a signed-in user with Supabase configured gets
+`SupabaseChatMessageHistory`, everyone else (and any load failure — logged, not raised) gets
+`agent/memory.py`'s store, so a Supabase hiccup degrades chat instead of breaking it. The frontend's
+per-browser `session_id` (already sent on every request, already a `uuid`-shaped string) doubles as
+the `conversations.id` primary key — no new client-side identifier needed. Persisting a turn is
+network I/O, so `run_agent`/`run_agent_stream` await it via `anyio.to_thread.run_sync` and wrap it in
+its own `try`/`except`: a persistence failure is logged and swallowed, never discarding an answer the
+user already has. `GET /api/conversations` / `GET /api/conversations/{id}` (both gated like `/api/me`)
+list/fetch a signed-in user's persisted conversations. This is scoped to chat history only — the
+practice-log/skill-level half of a session (`agent/memory.py`'s other fields) is untouched until B3.
+
 **Endpoints.** `POST /api/chat` returns the full reply as JSON. `POST /api/chat/stream` (used by
 the frontend) returns a chunked `text/plain` stream of **NDJSON frames** (one JSON object per line).
 `GET /api/health/db` (authenticated) is a Supabase connectivity probe, kept off the public
 `/api/health` so a DB outage never fails Render's platform check. `GET /api/me` (B1) returns the
 signed-in user's own profile: it requires **both** the proxy token **and** a verified Supabase user
 JWT (`get_current_user`), and reads through the RLS-scoped client — the end-to-end proof that user
-identity propagates browser → proxy → backend → RLS.
-Both chat routes share request body, auth, and rate limits. `run_agent_stream` (via `AgentExecutor.astream_events`)
+identity propagates browser → proxy → backend → RLS. `GET /api/conversations` and `GET
+/api/conversations/{id}` (B2) use the same two-gate shape to list/fetch a signed-in user's persisted
+chat history.
+Both chat routes share request body, auth, and rate limits, and additionally accept an optional
+`Authorization: Bearer` (verified the same way as `/api/me`; absent → anonymous, present-but-invalid
+→ 401) to attribute + persist the turn (B2, see above). `run_agent_stream` (via `AgentExecutor.astream_events`)
 emits four frame types — changing them requires updating `Chat.tsx`'s line parser:
 - `{"type":"status","label":…}` — immediate `"Thinking…"` + a per-tool label per `on_tool_start` (`TOOL_STATUS_LABELS`)
 - `{"type":"token","text":…}` — final-answer content deltas (including the trailing `show_chords`/`show_chord` JSON block; client reassembles + parses it on stream end)
@@ -213,7 +235,7 @@ in `observability/`.
 | Agent | LangChain 0.3.x, `create_tool_calling_agent`, `AgentExecutor` |
 | LLM | DeepSeek (`deepseek-chat` via `langchain-openai` → `api.deepseek.com/v1`) |
 | Web search tool | DuckDuckGo via `langchain-community` (`DuckDuckGoSearchRun`) |
-| Session memory | `ConversationBufferWindowMemory` k=10, in-process Python dict |
+| Session memory | `ConversationBufferWindowMemory` k=10 — in-process Python dict (anonymous) or Postgres via `conversation_store.py` (signed-in, B2) |
 | Persistence & auth | Supabase (Postgres + Auth + RLS) + `pgvector`; versioned SQL migrations (Epic B) — `supabase-py` client |
 | Auth (frontend) | Supabase Auth via `@supabase/ssr` (httpOnly-cookie sessions) + `@supabase/supabase-js` |
 | Auth (backend) | `PyJWT[crypto]` — verifies the Supabase user JWT against the project's public JWKS (asymmetric) |
@@ -318,9 +340,10 @@ updates; hit `GET /api/health`, `/api/chords`, `/api/progressions` after `data/`
 | `backend/main.py` | FastAPI app, CORS, auth, rate limiting, all routes |
 | `backend/agent/coach_agent.py` | LLM setup, system prompt, `run_agent` / `run_agent_stream` |
 | `backend/agent/tools.py` | All 14 LangChain tools + music-theory helpers |
-| `backend/agent/memory.py` | In-process session store, TTL eviction |
-| `backend/db.py` | Supabase client (service-role + per-user RLS) + `check_connectivity` + `get_own_profile` |
-| `backend/auth.py` | Supabase user-JWT verification (asymmetric JWKS) — `get_current_user` dependency (B1) |
+| `backend/agent/memory.py` | In-process session store, TTL eviction (anonymous chat) |
+| `backend/agent/conversation_store.py` | `SupabaseChatMessageHistory` — Postgres-backed chat history for signed-in users (B2) |
+| `backend/db.py` | Supabase client (service-role + per-user RLS) + `check_connectivity` + `get_own_profile` + `list_conversations`/`get_conversation` (B2) |
+| `backend/auth.py` | Supabase user-JWT verification (asymmetric JWKS) — `get_current_user` / `get_current_user_optional` (B1/B2) |
 | `supabase/migrations/` | Versioned SQL schema: tables, pgvector, RLS policies (Epic B/C) |
 | `backend/rag/ingest.py` | `python -m rag` pipeline: chunk -> embed -> delete-then-insert -> prune orphans (C0) |
 | `backend/rag/embeddings.py` | `embed_texts()` — Gemini `gemini-embedding-001`, 768-dim, manual L2 normalization (C0) |
@@ -402,10 +425,14 @@ browser. The lone exception is the Supabase **anon/publishable** key, which is a
   **in addition to** `require_internal_token`, then read/write via the RLS-scoped client with that
   user's `access_token`. Don't take a user id from the request body/query — derive it from the
   verified JWT. Keep the session in httpOnly cookies and forward it via the proxy (`bearerHeader`),
-  never expose the access token to client JS, and never accept HS256 in JWT verification.
+  never expose the access token to client JS, and never accept HS256 in JWT verification. A route
+  that must stay usable *without* an account (chat) uses `get_current_user_optional` instead (B2):
+  no header → anonymous; a present-but-invalid token still 401s rather than silently downgrading.
 - **Don't** add a *different* database or session store — Epic B standardized on Supabase Postgres
-  (this reverses the old MVP "no DB" stance). Agent chat memory is still the in-process dict until
-  the B2 story migrates it; don't assume conversations persist before then.
+  (this reverses the old MVP "no DB" stance). Chat history for a **signed-in** user now persists to
+  Postgres (B2, via `agent/conversation_store.py`); an **anonymous** session is still the in-process
+  dict — don't assume anonymous conversations survive a restart. The practice-log/skill-level half
+  of a session is untouched either way until B3.
 - **Don't** expand CORS origins beyond `FRONTEND_URL` (+ localhost in dev) without discussion.
 - **Don't** add a tool without registering it in `TOOLS`, or a backend env var without adding it to
   `.env.example` and this file.

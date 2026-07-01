@@ -38,6 +38,14 @@ def supabase_configured() -> bool:
     return bool(_env("SUPABASE_URL") and _env("SUPABASE_SERVICE_ROLE_KEY"))
 
 
+def supabase_user_configured() -> bool:
+    """True when the backend has enough config to build RLS-scoped user clients
+    (`get_user_client`) — the anon key rather than the service-role key. Checked
+    separately from `supabase_configured` because persisting a user's own
+    conversations (B2 — #27) never needs the service-role key."""
+    return bool(_env("SUPABASE_URL") and _env("SUPABASE_ANON_KEY"))
+
+
 @lru_cache(maxsize=1)
 def get_service_client() -> "Client":
     """Service-role Supabase client (RLS-bypassing). Cached as a singleton.
@@ -94,6 +102,51 @@ def get_own_profile(access_token: str) -> Optional[dict]:
     )
     rows = result.data or []
     return rows[0] if rows else None
+
+
+def list_conversations(access_token: str) -> list[dict]:
+    """List the signed-in user's conversations, newest-active first (B2 — #27).
+
+    RLS-scoped: PostgREST runs with the caller's JWT, so `conversations_select_own`
+    guarantees only that user's rows can ever come back.
+    """
+    client = get_user_client(access_token)
+    result = (
+        client.table("conversations")
+        .select("id, title, created_at, updated_at")
+        .order("updated_at", desc=True)
+        .execute()
+    )
+    return result.data or []
+
+
+def get_conversation(access_token: str, conversation_id: str) -> Optional[dict]:
+    """Fetch one conversation with its messages, or None if it doesn't exist / isn't
+    owned by the caller (B2 — #27). RLS makes "doesn't exist" and "not yours"
+    indistinguishable from the caller's point of view, which is the correct
+    behaviour for an ownership boundary.
+    """
+    client = get_user_client(access_token)
+    conv_result = (
+        client.table("conversations")
+        .select("id, title, created_at, updated_at")
+        .eq("id", conversation_id)
+        .limit(1)
+        .execute()
+    )
+    rows = conv_result.data or []
+    if not rows:
+        return None
+    conversation = rows[0]
+    msg_result = (
+        client.table("messages")
+        .select("role, content, agent_action, created_at")
+        .eq("conversation_id", conversation_id)
+        .order("created_at")
+        .execute()
+    )
+    conversation["messages"] = msg_result.data or []
+    return conversation
 
 
 def check_connectivity() -> dict[str, str]:

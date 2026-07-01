@@ -8,6 +8,8 @@ agent is never actually invoked because every chat request is short-circuited by
 auth, validation, or the missing-key 503 before reaching the LLM.
 """
 
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -304,3 +306,175 @@ class TestMe:
             main.app.dependency_overrides.pop(get_current_user, None)
 
         assert res.status_code == 503
+
+
+# ─── /api/conversations, /api/conversations/{id} (B2 — #27) ────────────────────
+class TestConversations:
+    """Same two-gate shape as /api/me: proxy secret + verified user JWT, then an
+    RLS-scoped read (db.py is unit-tested separately in test_db_client.py)."""
+
+    def test_list_requires_internal_token(self, client):
+        res = client.get("/api/conversations")
+        assert res.status_code == 401
+
+    def test_list_requires_bearer_token(self, client):
+        res = client.get("/api/conversations", headers=auth())
+        assert res.status_code == 401
+
+    def test_list_returns_conversations_for_verified_user(self, client, monkeypatch):
+        import db
+
+        main.app.dependency_overrides[get_current_user] = lambda: AuthedUser(
+            id="user-1", email=None, access_token="tok"
+        )
+        monkeypatch.setattr(db, "supabase_user_configured", lambda: True)
+        monkeypatch.setattr(db, "list_conversations", lambda token: [{"id": "c1", "title": "hi"}])
+        try:
+            res = client.get("/api/conversations", headers=auth())
+        finally:
+            main.app.dependency_overrides.pop(get_current_user, None)
+
+        assert res.status_code == 200
+        assert res.json() == {"conversations": [{"id": "c1", "title": "hi"}]}
+
+    def test_list_503_when_supabase_unconfigured(self, client, monkeypatch):
+        import db
+
+        main.app.dependency_overrides[get_current_user] = lambda: AuthedUser(
+            id="user-1", email=None, access_token="tok"
+        )
+        monkeypatch.setattr(db, "supabase_user_configured", lambda: False)
+        try:
+            res = client.get("/api/conversations", headers=auth())
+        finally:
+            main.app.dependency_overrides.pop(get_current_user, None)
+
+        assert res.status_code == 503
+
+    def test_get_one_requires_bearer_token(self, client):
+        res = client.get(
+            "/api/conversations/550e8400-e29b-41d4-a716-446655440000", headers=auth()
+        )
+        assert res.status_code == 401
+
+    def test_get_one_returns_404_for_malformed_id_without_querying_the_db(self, client, monkeypatch):
+        import db
+
+        main.app.dependency_overrides[get_current_user] = lambda: AuthedUser(
+            id="user-1", email=None, access_token="tok"
+        )
+        monkeypatch.setattr(db, "supabase_user_configured", lambda: True)
+
+        def boom(*_a, **_k):
+            raise AssertionError("should not query the DB for a non-UUID id")
+
+        monkeypatch.setattr(db, "get_conversation", boom)
+        try:
+            res = client.get("/api/conversations/not-a-uuid", headers=auth())
+        finally:
+            main.app.dependency_overrides.pop(get_current_user, None)
+
+        assert res.status_code == 404
+
+    def test_get_one_returns_404_when_not_found_or_not_owned(self, client, monkeypatch):
+        # RLS makes "doesn't exist" and "belongs to someone else" indistinguishable
+        # to the caller — db.get_conversation returns None for both.
+        import db
+
+        main.app.dependency_overrides[get_current_user] = lambda: AuthedUser(
+            id="user-1", email=None, access_token="tok"
+        )
+        monkeypatch.setattr(db, "supabase_user_configured", lambda: True)
+        monkeypatch.setattr(db, "get_conversation", lambda token, cid: None)
+        try:
+            res = client.get(
+                "/api/conversations/550e8400-e29b-41d4-a716-446655440000", headers=auth()
+            )
+        finally:
+            main.app.dependency_overrides.pop(get_current_user, None)
+
+        assert res.status_code == 404
+
+    def test_get_one_returns_conversation_with_messages(self, client, monkeypatch):
+        import db
+
+        main.app.dependency_overrides[get_current_user] = lambda: AuthedUser(
+            id="user-1", email=None, access_token="tok"
+        )
+        monkeypatch.setattr(db, "supabase_user_configured", lambda: True)
+        payload = {"id": "c1", "title": "hi", "messages": [{"role": "user", "content": "hi"}]}
+        monkeypatch.setattr(db, "get_conversation", lambda token, cid: payload)
+        try:
+            res = client.get(
+                "/api/conversations/550e8400-e29b-41d4-a716-446655440000", headers=auth()
+            )
+        finally:
+            main.app.dependency_overrides.pop(get_current_user, None)
+
+        assert res.status_code == 200
+        assert res.json() == payload
+
+
+# ─── _resolve_history (B2 — #27: pick in-memory vs. Postgres-backed history) ───
+class TestResolveHistory:
+    def test_anonymous_request_uses_in_memory_history(self):
+        from agent.memory import get_history
+
+        history = asyncio.run(main._resolve_history("anon-session", None))
+        assert history is get_history("anon-session")
+
+    def test_authenticated_user_uses_supabase_backed_history(self, monkeypatch):
+        import db
+
+        monkeypatch.setattr(db, "supabase_user_configured", lambda: True)
+
+        created = {}
+
+        class _FakeHistory:
+            def __init__(self, conversation_id, user_id, access_token):
+                created["args"] = (conversation_id, user_id, access_token)
+
+            @property
+            def messages(self):
+                return []
+
+            def add_messages(self, _messages):
+                pass
+
+        monkeypatch.setattr(
+            "agent.conversation_store.SupabaseChatMessageHistory", _FakeHistory
+        )
+        user = AuthedUser(id="user-1", email=None, access_token="tok")
+
+        history = asyncio.run(main._resolve_history("conv-1", user))
+
+        assert isinstance(history, _FakeHistory)
+        assert created["args"] == ("conv-1", "user-1", "tok")
+
+    def test_authenticated_user_falls_back_when_supabase_unconfigured(self, monkeypatch):
+        import db
+        from agent.memory import get_history
+
+        monkeypatch.setattr(db, "supabase_user_configured", lambda: False)
+        user = AuthedUser(id="user-1", email=None, access_token="tok")
+
+        history = asyncio.run(main._resolve_history("fallback-session-1", user))
+
+        assert history is get_history("fallback-session-1")
+
+    def test_authenticated_user_falls_back_when_load_fails(self, monkeypatch, caplog):
+        import db
+        from agent.memory import get_history
+
+        monkeypatch.setattr(db, "supabase_user_configured", lambda: True)
+
+        def boom(*_a, **_k):
+            raise RuntimeError("supabase unreachable")
+
+        monkeypatch.setattr("agent.conversation_store.SupabaseChatMessageHistory", boom)
+        user = AuthedUser(id="user-1", email=None, access_token="tok")
+
+        with caplog.at_level("ERROR"):
+            history = asyncio.run(main._resolve_history("fallback-session-2", user))
+
+        assert history is get_history("fallback-session-2")
