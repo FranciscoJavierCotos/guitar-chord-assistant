@@ -9,6 +9,7 @@ the matching public key, so the real `jwt.decode` path runs against known inputs
 
 import time
 
+import anyio
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -122,6 +123,26 @@ class TestVerifyToken:
         with pytest.raises(auth.HTTPException) as exc:
             auth._verify_token(make_token(private_key))
         assert exc.value.status_code == 503
+
+
+# ─── get_current_user_optional (B2 — #27: chat stays usable anonymously) ───────
+class TestGetCurrentUserOptional:
+    def test_no_header_returns_none(self):
+        result = anyio.run(auth.get_current_user_optional, None)
+        assert result is None
+
+    def test_valid_token_returns_user(self, use_jwks, keypair):
+        private_key, _ = keypair
+        token = make_token(private_key)
+        result = anyio.run(auth.get_current_user_optional, f"Bearer {token}")
+        assert result.id == "user-123"
+
+    def test_invalid_token_still_401s_rather_than_downgrading(self, use_jwks):
+        # A *present but bad* token is anomalous (tampered/expired) — surface it
+        # as a 401 rather than silently treating the request as anonymous.
+        with pytest.raises(auth.HTTPException) as exc:
+            anyio.run(auth.get_current_user_optional, "Bearer not-a-real-jwt")
+        assert exc.value.status_code == 401
 
 
 # ─── _bearer_token ──────────────────────────────────────────────────────────────
