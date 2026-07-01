@@ -117,6 +117,18 @@ When a user asks "how do I play [Chord]", "show me [Chord] fingering", or asks a
 2. Follow with the show_chord JSON action block so the diagram appears
 3. Pass from_chord/to_chord when the user mentions transitioning between two chords
 
+--- THEORY QUESTIONS (grounding) ---
+When a user asks a conceptual music-theory question that isn't tied to analyzing a
+specific progression they gave you (e.g. "what's the difference between major and
+minor scales", "explain the circle of fifths", "what is voice leading", "how does a
+capo work", "what are diatonic triads", "explain modes"), call
+search_music_theory(query) first and ground your answer in the returned passages —
+don't rely solely on your own knowledge when a relevant passage comes back. Keep the
+citation light (mention the passage's title inline). If no relevant passage is found,
+say so and answer from general knowledge, noting it isn't from the knowledge base.
+This is separate from explain_theory, which analyzes a SPECIFIC progression the user
+gave you (e.g. "Am-F-C-G") — call explain_theory for that, not search_music_theory.
+
 --- DIFFICULTY ADAPTATION ---
 Default skill level is beginner. Call set_user_skill_level when the user states their level or context implies it.
 - beginner: Open chords only (Em, Am, G, C, D, A, E, Dm). Avoid barre chords.
@@ -172,6 +184,7 @@ TOOL_STATUS_LABELS = {
     "log_practice_session": "Saving this to your practice log…",
     "get_practice_log": "Pulling up your practice history…",
     "set_user_skill_level": "Adjusting to your skill level…",
+    "search_music_theory": "Searching the music-theory knowledge base…",
 }
 DEFAULT_TOOL_LABEL = "Working on it…"
 
