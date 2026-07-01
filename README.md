@@ -16,7 +16,7 @@ This is a small product wrapped in the engineering an AI feature actually needs 
 
 | | |
 |---|---|
-| 🤖 **Agentic, not a chatbot** | LangChain native function-calling agent with **13 tools** (chord lookup, runtime music-theory engine, web search, practice log) and a capped reasoning loop. |
+| 🤖 **Agentic, not a chatbot** | LangChain native function-calling agent with **14 tools** (chord lookup, runtime music-theory engine, RAG retrieval, web search, practice log) and a capped reasoning loop. |
 | 🎯 **Grounded output** | The LLM drives the UI through a **structured JSON action block**, but every chord it renders is re-fetched from an authoritative database — the model never hallucinates a fingering onto the screen. |
 | 📊 **Quality is tested, not vibes** | An offline **eval harness** runs a version-controlled golden set through the real agent with **deterministic graders + an LLM-as-judge**, at a pinned temperature so the gate is reproducible and runs in CI. |
 | 🔭 **Observable** | Opt-in **OpenTelemetry** traces every request → agent → tool → LLM call, with metrics for latency, **token cost**, and time-to-first-token, exported to Grafana Cloud. |
@@ -225,12 +225,12 @@ Browser
   └─ POST /api/chat/stream ─▶ FastAPI (8000)              NDJSON event-frame stream
                                main.py                    routes, CORS, auth, rate limiting
                                agent/coach_agent.py        AgentExecutor + system prompt + streaming
-                               agent/tools.py              13 @tool functions
+                               agent/tools.py              14 @tool functions
                                agent/memory.py             in-process session store, 2-hour TTL
                                db.py                       Supabase client (service-role + per-user RLS)
                                data/{chords,progressions}  40+ chords, 30+ named progressions
                                eval/                       offline answer-quality eval (python -m eval)
-                               rag/                        RAG corpus + ingestion (python -m rag, Epic C)
+                               rag/                        RAG corpus + ingestion + retrieval (python -m rag, Epic C)
                                observability.py            opt-in OpenTelemetry (spans + metrics)
 
 supabase/migrations/          versioned SQL schema (profiles, conversations, messages,
@@ -371,6 +371,19 @@ Ingestion is **idempotent**: each run deletes and reinserts the rows for every c
 prunes any `source` no longer present on disk — re-running after an edit converges to the same state
 regardless of where a previous run stopped. Embedding the full ~25-40-chunk corpus costs well under
 $0.01 at Gemini's $0.15/1M-token rate, so re-running after small edits is effectively free.
+
+### Retrieval tool (story C1)
+
+`search_music_theory` is the 14th agent tool: it embeds the user's question with the same
+`embed_texts` helper C0 ingestion uses (so query and corpus vectors are always on the same
+model/dimension/normalization), then calls the `match_kb_chunks` Postgres RPC (migration
+`20260701185136_c1_match_kb_chunks.sql`) to rank `kb_chunks` by cosine similarity and return the
+top-k passages with their `source`/`title`/`url` for citation. A dedicated RPC is needed because
+PostgREST's table query builder can't express pgvector's `<=>` distance operator or an `ORDER BY`
+on it. The system prompt directs the agent to call this tool — and ground its answer in what comes
+back — for conceptual theory questions ("explain the circle of fifths", "what is voice leading");
+analyzing a *specific* progression the user gives you still goes through `explain_theory`, the
+runtime theory engine.
 
 ---
 
