@@ -77,7 +77,7 @@ decisions, outcome); it does not replace updating `README.md` / this file per th
 backend/            FastAPI app — entry point: main.py
   agent/
     coach_agent.py  builds + runs the LangChain AgentExecutor (run_agent + run_agent_stream)
-    tools.py        13 @tool functions (chord lookup, theory, web search, practice log)
+    tools.py        14 @tool functions (chord lookup, theory, RAG retrieval, web search, practice log)
     memory.py       in-process session store (dict, auto-expires after 2 h)
   data/
     chords.py       static dict of 40+ chord fingerings
@@ -85,11 +85,12 @@ backend/            FastAPI app — entry point: main.py
   db.py             Supabase client (service-role + per-user RLS) + connectivity check
   auth.py           Supabase user-JWT verification (asymmetric JWKS) — get_current_user (B1)
   eval/             offline agent eval harness (python -m eval)
-  rag/              RAG corpus + ingestion pipeline (Epic C, story C0 — python -m rag)
+  rag/              RAG corpus + ingestion + retrieval (Epic C — python -m rag, C0/C1)
     corpus/         12 hand-authored music-theory markdown notes (source of truth for kb_chunks)
     chunking.py     parse_corpus_file: frontmatter + heading/paragraph chunking
     embeddings.py   embed_texts: Gemini gemini-embedding-001, 768-dim, manual L2 norm
     ingest.py       chunk -> embed -> delete-then-insert per source -> prune orphans
+    retrieval.py    search_corpus: embed query -> match_kb_chunks RPC -> top-k chunks (C1)
   observability.py  opt-in OpenTelemetry setup + agent/tool spans & metrics
   main.py           CORS, auth, rate limiting, request logging, all routes
 supabase/
@@ -145,7 +146,7 @@ gates it). When persisting/reading user data, go through RLS — don't trust the
 
 **RAG corpus (Epic C — story C0, #30).** `public.kb_chunks` (migration
 `20260630223312_c0_kb_embeddings.sql`) holds the curated music-theory corpus the retrieval tool (C1)
-will search over — `vector(768)` embeddings via `extensions.vector`, an HNSW cosine index, chunk
+searches over — `vector(768)` embeddings via `extensions.vector`, an HNSW cosine index, chunk
 text, and `source`/`title`/`url` for citation rendering. Unlike every other table here, it is
 **shared reference data, not per-user data**, so its RLS shape is deliberately public-read /
 service-role-write rather than owner-scoped on `auth.uid()`: RLS is enabled with only a
@@ -155,6 +156,19 @@ chunking `backend/rag/corpus/*.md`, embedding via Gemini (`backend/rag/embedding
 upserting idempotently (delete-and-reinsert per `source`, then orphan pruning). Embedding the full
 ~25-40-chunk corpus costs well under $0.01 at Gemini's $0.15/1M-token rate — re-running ingestion
 after a corpus edit is effectively free.
+
+**RAG retrieval tool (Epic C — story C1, #31).** `search_music_theory` (`agent/tools.py`, backed by
+`backend/rag/retrieval.py::search_corpus`) embeds the user's query with the same `embed_texts`
+helper C0 ingestion uses — so query and corpus vectors can never drift on model/dimension/
+normalization — then calls the `match_kb_chunks` Postgres RPC (migration
+`20260701185136_c1_match_kb_chunks.sql`) to rank `kb_chunks` by cosine similarity. A dedicated RPC
+exists because PostgREST's table query builder can't express pgvector's `<=>` operator or an
+`ORDER BY` on it; the function is `stable`, `search_path`-pinned, and grantable to `anon` /
+`authenticated` / `service_role` since it only reads the already-public `kb_chunks` table. The tool
+runs through the service-role client (same as ingestion) because retrieval must work for anonymous
+chat sessions too. The system prompt (`coach_agent.py`) directs the agent to call this tool for
+conceptual theory questions (not for analyzing a specific progression — that's still
+`explain_theory`) and ground its answer in the returned passages.
 
 **Endpoints.** `POST /api/chat` returns the full reply as JSON. `POST /api/chat/stream` (used by
 the frontend) returns a chunked `text/plain` stream of **NDJSON frames** (one JSON object per line).
@@ -303,13 +317,14 @@ updates; hit `GET /api/health`, `/api/chords`, `/api/progressions` after `data/`
 | --- | --- |
 | `backend/main.py` | FastAPI app, CORS, auth, rate limiting, all routes |
 | `backend/agent/coach_agent.py` | LLM setup, system prompt, `run_agent` / `run_agent_stream` |
-| `backend/agent/tools.py` | All 13 LangChain tools + music-theory helpers |
+| `backend/agent/tools.py` | All 14 LangChain tools + music-theory helpers |
 | `backend/agent/memory.py` | In-process session store, TTL eviction |
 | `backend/db.py` | Supabase client (service-role + per-user RLS) + `check_connectivity` + `get_own_profile` |
 | `backend/auth.py` | Supabase user-JWT verification (asymmetric JWKS) — `get_current_user` dependency (B1) |
 | `supabase/migrations/` | Versioned SQL schema: tables, pgvector, RLS policies (Epic B/C) |
 | `backend/rag/ingest.py` | `python -m rag` pipeline: chunk -> embed -> delete-then-insert -> prune orphans (C0) |
 | `backend/rag/embeddings.py` | `embed_texts()` — Gemini `gemini-embedding-001`, 768-dim, manual L2 normalization (C0) |
+| `backend/rag/retrieval.py` | `search_corpus()` — embed query -> `match_kb_chunks` RPC -> top-k chunks with citations (C1) |
 | `backend/observability.py` | Opt-in OpenTelemetry: SDK/OTLP setup, spans, RED + domain metrics |
 | `backend/data/chords.py` | Chord fingering database |
 | `backend/data/progressions.py` | Progression dataset |

@@ -844,6 +844,37 @@ def get_practice_log() -> str:
 
 
 @tool
+def search_music_theory(query: str) -> str:
+    """Search the curated music-theory knowledge base for passages relevant to a
+    conceptual theory question (scales, modes, harmonic function, voice leading,
+    capo/transposition, strumming/fingerpicking technique, etc.).
+
+    Use this to ground conceptual explanations in the corpus instead of answering
+    purely from your own knowledge. Not for analyzing a SPECIFIC chord progression
+    the user gave you — use explain_theory for that — and not for chord fingerings
+    or the progression dataset — use get_chord_info / get_progressions_* for those.
+
+    Args:
+        query: The theory question or concept to search for, e.g. 'circle of fifths'.
+    """
+    from rag.retrieval import search_corpus
+
+    try:
+        results = search_corpus(query)
+    except RuntimeError as exc:
+        return f"Knowledge-base search is unavailable right now: {exc}"
+
+    if not results:
+        return "No relevant passages found in the knowledge base for this query."
+
+    lines = ["## Relevant knowledge-base passages:\n"]
+    for r in results:
+        citation = f" ({r['url']})" if r.get("url") else ""
+        lines.append(f"### {r['title']}{citation}\n{r['content']}\n")
+    return "\n".join(lines)
+
+
+@tool
 def set_user_skill_level(level: str) -> str:
     """Set the user's guitar skill level so chord suggestions can be adapted to their ability.
     Call this when the user mentions their experience level or when context implies it.
@@ -882,4 +913,5 @@ TOOLS = [
     log_practice_session,
     get_practice_log,
     set_user_skill_level,
+    search_music_theory,
 ]
