@@ -128,7 +128,7 @@ def test_match_kb_chunks_rpc_exists_and_is_callable():
     exist, be readable, and stay grantable to the roles the API actually uses."""
     sql = _normalize(_sql())
     assert "create or replace function public.match_kb_chunks" in sql
-    assert "order by kb_chunks.embedding <=> query_embedding" in sql
+    assert "order by kb_chunks.embedding operator(extensions.<=>) query_embedding" in sql
     assert (
         "grant execute on function public.match_kb_chunks(extensions.vector, int) "
         "to anon, authenticated, service_role" in sql
